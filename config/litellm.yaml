@@ -1,33 +1,26 @@
-# LiteLLM — z.ai primary + Groq/OpenRouter/Anthropic fallback
+# LiteLLM — z.ai GLM-5.1 primary everywhere + fallback chain
 model_list:
-  # z.ai FREE models (primary for classification, reflection, mem0)
-  - model_name: "zai-flash"
-    litellm_params:
-      model: "openai/glm-4.7-flash"
-      api_base: "https://api.z.ai/api/paas/v4/"
-      api_key: "os.environ/ZAI_API_KEY"
-
-  # z.ai flagship (generation)
-  - model_name: "zai-flagship"
+  # z.ai GLM-5.1 — ALL tasks (generation, classification, reflection, mem0 judge)
+  - model_name: "default"
     litellm_params:
       model: "openai/glm-5.1"
       api_base: "https://api.z.ai/api/paas/v4/"
       api_key: "os.environ/ZAI_API_KEY"
 
   # Groq fallback
-  - model_name: "groq-fast"
+  - model_name: "fallback-1"
     litellm_params:
       model: "groq/llama-3.1-8b-instant"
       api_key: "os.environ/GROQ_API_KEY"
 
   # OpenRouter fallback
-  - model_name: "openrouter-fast"
+  - model_name: "fallback-2"
     litellm_params:
       model: "openrouter/meta-llama/llama-3.1-8b-instruct"
       api_key: "os.environ/OPENROUTER_API_KEY"
 
   # Anthropic last resort
-  - model_name: "anthropic-fallback"
+  - model_name: "fallback-3"
     litellm_params:
       model: "anthropic/claude-haiku-4-5"
       api_key: "os.environ/ANTHROPIC_API_KEY"
@@ -37,10 +30,10 @@ router_settings:
   num_retries: 1
   timeout: 30
   fallbacks:
-    - {"zai-flagship": ["groq-fast", "openrouter-fast", "anthropic-fallback"]}
+    - {"default": ["fallback-1", "fallback-2", "fallback-3"]}
 
 litellm_settings:
-  forward_llm_provider_auth_headers: true   # BYOK pass-through
+  forward_llm_provider_auth_headers: true
   cache: true
   cache_params:
     type: redis

@@ -24,7 +24,7 @@ mem0_config = {
     "llm": {
         "provider": "openai",  # mem0 uses OpenAI-compatible — point to z.ai
         "config": {
-            "model": "glm-4.5-flash",            # FREE z.ai model
+            "model": "glm-5.1",            # FREE z.ai model
             "openai_base_url": "https://api.z.ai/api/paas/v4/",
             "api_key": os.environ.get("ZAI_API_KEY", ""),
         },

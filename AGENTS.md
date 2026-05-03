@@ -52,9 +52,9 @@ response = await acompletion(
 )
 ```
 
-**z.ai free models to prefer:**
+**z.ai model — glm-5.1 everywhere:**
 - `glm-4.7-flash` — FREE, use for classification + reflection
-- `glm-4.5-flash` — FREE, use for memory extraction (mem0 judge)
+- `glm-5.1 (mem0 judge) judge)
 - `glm-5.1` — paid flagship, use for complex generation only
 
 ---
@@ -187,7 +187,7 @@ Week 11: DSPy ReAct planner + full /v1/think endpoint
 5. **Qdrant batch_size=64** ingestion, **16** real-time query
 6. **Cross-encoder input cap = 15 docs** — 30+ causes ARM timeout
 7. **KeyDB: AOF only, no RDB** — fork() causes OOM
-8. **Use z.ai glm-4.7-flash (FREE) for** classification, reflection, mem0 judge
+8. **Use z.ai glm-5.1 (everywhere) for** classification, reflection, mem0 judge
 9. **Use z.ai glm-5.1 for** complex generation (only when BYOK key available)
 10. **mem0 collection name = `synapse_memory`** (separate from `synapse_knowledge`)
 

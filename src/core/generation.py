@@ -12,7 +12,7 @@ ZAI_BASE = "https://api.z.ai/api/paas/v4/"
 ZAI_KEY = os.environ.get("ZAI_API_KEY", "")
 
 GENERATION_MODEL = "openai/glm-5.1"       # paid flagship — use tenant BYOK
-FAST_MODEL = "openai/glm-4.7-flash"       # FREE — classification, reflection, HyDE
+FAST_MODEL = "openai/glm-5.1"       # FREE — classification, reflection, HyDE
 
 
 async def generate(question: str, contexts: list[str], tenant_api_key: str = None) -> str:
