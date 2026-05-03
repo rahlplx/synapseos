@@ -1,0 +1,14 @@
+name = "synapseos-edge"
+main = "worker.ts"
+compatibility_date = "2025-01-01"
+
+[vars]
+CACHE_TTL = 3600
+
+[[kv_namespaces]]
+binding = "RAG_CACHE"
+id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+
+[secrets]
+# Set via: wrangler secret put ORACLE_BACKEND
+# Value: https://your-oracle-arm-domain.com
