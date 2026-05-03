@@ -1,6 +1,7 @@
 """
 SynapseOS — FastAPI Entry Point
 Docs: /docs (Swagger) | /redoc
+Middleware order matters: TenantMiddleware runs FIRST (rate limit + BYOK before any route)
 """
 import os
 os.environ.setdefault("OMP_NUM_THREADS", "4")  # ARM CPU tuning
@@ -16,13 +17,18 @@ from src.api.routes import query, think, ingest, feedback, collections
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: warm models, verify connections
-    from src.core.retrieval import warm_models
+    # ── Startup ──
+    # 1. Warm ONNX models (avoid cold-start latency on first query)
+    from src.core.retrieval import warm_models, ensure_collection
     await warm_models()
+    # 2. Ensure Qdrant collection exists
+    await ensure_collection()
+    print("✅ SynapseOS ready — models warmed, collection ensured")
     yield
-    # Shutdown: flush Langfuse
+    # ── Shutdown ──
     from langfuse import Langfuse
     Langfuse().flush()
+    print("✅ SynapseOS shutdown — Langfuse flushed")
 
 
 app = FastAPI(
@@ -32,10 +38,13 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# ── Middleware (order: last added = first executed) ──
+# TenantMiddleware MUST run before routes (rate limit + BYOK injection)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 app.add_middleware(LangfuseMiddleware)
 app.add_middleware(TenantMiddleware)
 
+# ── Routes ──
 app.include_router(query.router, prefix="/v1")
 app.include_router(think.router, prefix="/v1")
 app.include_router(ingest.router, prefix="/v1")
@@ -45,4 +54,5 @@ app.include_router(collections.router, prefix="/v1")
 
 @app.get("/health")
 async def health():
+    """Health check — skipped by TenantMiddleware (no auth required)."""
     return {"status": "ok", "version": "1.0.0"}

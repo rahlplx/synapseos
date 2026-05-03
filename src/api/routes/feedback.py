@@ -14,5 +14,12 @@ class FeedbackRequest(BaseModel):
 
 @router.post("/feedback")
 async def feedback_endpoint(body: FeedbackRequest, request: Request):
-    langfuse.score(trace_id=body.trace_id, name="user_feedback", value=body.rating)
+    """Submit thumbs up/down on a RAG response."""
+    tenant_id = getattr(request.state, "tenant_id", "unknown")
+    langfuse.score(
+        trace_id=body.trace_id,
+        name="user_feedback",
+        value=body.rating,
+        metadata={"tenant_id": tenant_id},
+    )
     return {"recorded": True}

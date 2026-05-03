@@ -1,46 +1,59 @@
 """
 TenantMiddleware — Rate limiting + BYOK key injection
 Evaluated BEFORE any ONNX/embedding work to prevent CPU starvation.
+Public paths (/health, /docs) are skipped entirely.
 """
 import time
 from fastapi import Request, HTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
 from cryptography.fernet import Fernet
 import redis.asyncio as redis
-import asyncpg
 import os
 
 keydb = redis.from_url(os.environ.get("KEYDB_URL", "redis://keydb:6379"))
 cipher = Fernet(os.environ["ENCRYPTION_KEY"].encode())
 
+# Paths that don't require tenant authentication
 PUBLIC_PATHS = {"/health", "/docs", "/redoc", "/openapi.json"}
 
 
 class TenantMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
+        # Skip auth for public paths
         if request.url.path in PUBLIC_PATHS:
             return await call_next(request)
 
+        # ── 1. Tenant Identification ──
         tenant_id = request.headers.get("X-Tenant-ID")
         if not tenant_id:
             raise HTTPException(401, "Missing X-Tenant-ID header")
 
-        # 1. Rate limit — sliding window — before ANY ONNX work
+        # ── 2. Rate Limiting — sliding window BEFORE any ONNX work ──
+        # This prevents CPU starvation from unauthenticated/over-limit requests
         window = int(time.time() // 60)
         limit_key = f"rate:{tenant_id}:{window}"
         count = await keydb.incr(limit_key)
         if count == 1:
             await keydb.expire(limit_key, 60)
+
+        # Check tenant-specific RPM limit (default: 60 RPM)
         rpm_limit = int(await keydb.get(f"tenant:{tenant_id}:rpm") or 60)
         if count > rpm_limit:
-            raise HTTPException(429, "Tenant rate limit exceeded")
+            raise HTTPException(429, f"Rate limit exceeded ({rpm_limit} RPM)")
 
-        # 2. BYOK key injection — AES-256 Fernet decrypt
+        # ── 3. BYOK Key Injection ──
+        # Check KeyDB first (fast), then fall back to platform default
         encrypted = await keydb.get(f"tenant:{tenant_id}:api_key")
         if encrypted:
-            request.state.litellm_api_key = cipher.decrypt(encrypted).decode()
+            try:
+                request.state.litellm_api_key = cipher.decrypt(encrypted).decode()
+            except Exception:
+                # Corrupted encryption — fall back to platform key
+                request.state.litellm_api_key = None
         else:
-            request.state.litellm_api_key = None  # uses platform default
+            # No BYOK key configured — use platform default (Groq free tier)
+            request.state.litellm_api_key = None
 
+        # Attach tenant_id for downstream routes
         request.state.tenant_id = tenant_id
         return await call_next(request)

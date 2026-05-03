@@ -14,14 +14,24 @@ langfuse = Langfuse(
 
 class LangfuseMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
+        # Only trace API requests, not health/docs
         if not request.url.path.startswith("/v1/"):
             return await call_next(request)
+
         tenant = getattr(request.state, "tenant_id", "unknown")
-        trace = langfuse.trace(name=request.url.path, metadata={"tenant": tenant})
+        trace = langfuse.trace(
+            name=request.url.path,
+            metadata={"tenant": tenant, "method": request.method},
+        )
         langfuse_context.configure(trace=trace)
+
         try:
             response = await call_next(request)
             trace.update(output={"status": response.status_code})
+        except Exception as e:
+            trace.update(output={"status": 500, "error": str(e)})
+            raise
         finally:
             langfuse.flush()
+
         return response

@@ -5,6 +5,7 @@ x-logging: &logging
   options: { max-size: "10m", max-file: "3" }
 
 services:
+  # ─── Vector Database ───
   qdrant:
     image: qdrant/qdrant:v1.13.5
     restart: unless-stopped
@@ -14,12 +15,15 @@ services:
       - ./config/qdrant.yaml:/qdrant/config/production.yaml
     environment:
       - QDRANT__STORAGE__PERFORMANCE__ASYNC_SCORER=true
+      - QDRANT__STORAGE__STORAGE_PATH=/var/lib/qdrant/storage
+      - QDRANT__LOG_LEVEL=WARN
     deploy:
       resources:
         limits: { cpus: "1.0", memory: "4G" }
         reservations: { memory: "1G" }
     logging: *logging
 
+  # ─── Relational Database ───
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
@@ -27,6 +31,7 @@ services:
       - POSTGRES_DB=synapseos
       - POSTGRES_USER=synapse
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - PGDATA=/var/lib/postgresql/data/pgdata
     volumes:
       - pg_data:/var/lib/postgresql/data
       - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init.sql
@@ -35,6 +40,7 @@ services:
         limits: { cpus: "0.5", memory: "2G" }
     logging: *logging
 
+  # ─── Cache + Queue + Rate Limit ───
   keydb:
     image: eqalpha/keydb:latest
     restart: unless-stopped
@@ -48,6 +54,7 @@ services:
         limits: { cpus: "0.5", memory: "1.5G" }
     logging: *logging
 
+  # ─── Object Storage ───
   minio:
     image: minio/minio:latest
     restart: unless-stopped
@@ -62,6 +69,7 @@ services:
         limits: { cpus: "0.5", memory: "1G" }
     logging: *logging
 
+  # ─── LiteLLM Proxy ───
   litellm:
     image: ghcr.io/berriai/litellm:main-latest
     restart: unless-stopped
@@ -69,7 +77,6 @@ services:
     volumes: ["./config/litellm.yaml:/app/config.yaml"]
     environment:
       - REDIS_URL=redis://keydb:6379
-      - ZAI_API_KEY=${ZAI_API_KEY}
       - GROQ_API_KEY=${GROQ_API_KEY}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
@@ -80,6 +87,7 @@ services:
         limits: { cpus: "0.5", memory: "512M" }
     logging: *logging
 
+  # ─── FastAPI Backend ───
   api:
     build: { context: ., dockerfile: Dockerfile }
     restart: unless-stopped
@@ -92,6 +100,31 @@ services:
         reservations: { cpus: "0.5", memory: "1.5G" }
     logging: *logging
 
+  # ─── Ingestion Worker (concurrency=1 for Docling ARM safety) ───
+  worker:
+    build: { context: ., dockerfile: Dockerfile.worker }
+    restart: unless-stopped
+    env_file: [.env]
+    depends_on: [keydb, qdrant, minio, postgres]
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: "4.5G" }
+    logging: *logging
+
+  # ─── MCP Server ───
+  mcp:
+    build: { context: ., dockerfile: Dockerfile.mcp }
+    restart: unless-stopped
+    ports: ["8095:8095"]
+    environment:
+      - SYNAPSE_BASE_URL=http://api:8000
+      - SYNAPSE_API_KEY=${MCP_SERVICE_KEY}
+    deploy:
+      resources:
+        limits: { cpus: "0.2", memory: "256M" }
+    logging: *logging
+
+  # ─── Observability ───
   langfuse:
     image: langfuse/langfuse:3
     restart: unless-stopped

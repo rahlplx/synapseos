@@ -1,0 +1,20 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+ENV PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential libpq-dev && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Install SDK locally
+COPY sdk/python/ ./sdk/python/
+RUN pip install --no-cache-dir -e ./sdk/python/
+
+COPY mcp/ ./mcp/
+
+# MCP server runs on stdio (for IDE integration) or HTTP (port 8095)
+CMD ["python", "mcp/synapse_mcp.py"]

@@ -1,6 +1,6 @@
-"""GET /v1/collections, DELETE /v1/documents/{id}"""
-from fastapi import APIRouter, Request
-from qdrant_client import AsyncQdrantClient
+"""GET /v1/collections, GET /v1/analytics, DELETE /v1/documents/{doc_id}, GET /v1/datasets"""
+from fastapi import APIRouter, Request, HTTPException
+from qdrant_client import AsyncQdrantClient, models
 import os
 
 router = APIRouter()
@@ -9,10 +9,117 @@ qdrant = AsyncQdrantClient(url=os.environ.get("QDRANT_URL", "http://qdrant:6333"
 
 @router.get("/collections")
 async def get_collections(request: Request):
+    """List document collection stats for the tenant."""
     tenant_id = request.state.tenant_id
-    info = await qdrant.get_collection("synapse_knowledge")
+    try:
+        info = await qdrant.get_collection("synapse_knowledge")
+        return {
+            "tenant_id": tenant_id,
+            "vector_count": info.points_count or 0,
+            "status": info.status,
+        }
+    except Exception:
+        return {"tenant_id": tenant_id, "vector_count": 0, "status": "not_found"}
+
+
+@router.get("/analytics")
+async def get_analytics(request: Request):
+    """RAGAS score trends + usage metrics for the last 7 days."""
+    tenant_id = request.state.tenant_id
+    import asyncpg
+
+    db_url = os.environ.get("DATABASE_URL", "").replace("+asyncpg", "")
+    if not db_url:
+        return {"error": "Database not configured"}
+
+    conn = await asyncpg.connect(db_url)
+    try:
+        row = await conn.fetchrow("""
+            SELECT
+                COUNT(*) as queries_7d,
+                AVG(ragas_faithfulness) as faithfulness,
+                AVG(ragas_relevancy) as relevancy,
+                AVG(ragas_combined) as combined
+            FROM interaction_logs
+            WHERE tenant_id = $1 AND created_at > now() - INTERVAL '7 days'
+        """, tenant_id)
+
+        top_queries = await conn.fetch("""
+            SELECT query, COUNT(*) as cnt
+            FROM interaction_logs
+            WHERE tenant_id = $1 AND created_at > now() - INTERVAL '7 days'
+            GROUP BY query ORDER BY cnt DESC LIMIT 5
+        """, tenant_id)
+    finally:
+        await conn.close()
+
     return {
-        "tenant_id": tenant_id,
-        "vector_count": info.vectors_count,
-        "status": info.status,
+        "ragas_7d": {
+            "faithfulness": round(float(row["faithfulness"] or 0), 3),
+            "answer_relevancy": round(float(row["relevancy"] or 0), 3),
+            "combined": round(float(row["combined"] or 0), 3),
+        },
+        "queries_7d": int(row["queries_7d"] or 0),
+        "top_queries": [r["query"] for r in top_queries],
     }
+
+
+@router.delete("/documents/{document_id}")
+async def delete_document(document_id: str, request: Request):
+    """Remove a document and all its vectors from Qdrant."""
+    tenant_id = request.state.tenant_id
+    import asyncpg
+
+    db_url = os.environ.get("DATABASE_URL", "").replace("+asyncpg", "")
+    conn = await asyncpg.connect(db_url)
+    try:
+        doc = await conn.fetchrow(
+            "SELECT * FROM documents WHERE id=$1::uuid AND tenant_id=$2",
+            document_id, tenant_id,
+        )
+        if not doc:
+            raise HTTPException(404, "Document not found")
+    finally:
+        await conn.close()
+
+    # Delete vectors by filter
+    await qdrant.delete(
+        collection_name="synapse_knowledge",
+        points_selector=models.FilterSelector(
+            filter=models.Filter(
+                must=[models.FieldCondition(
+                    key="source_url",
+                    match=models.MatchValue(value=doc["source_url"]),
+                )]
+            )
+        ),
+    )
+
+    return {"deleted": True, "document_id": document_id}
+
+
+@router.get("/datasets")
+async def list_datasets(request: Request):
+    """List exported fine-tuning datasets in MinIO."""
+    import boto3
+
+    minio = boto3.client(
+        "s3",
+        endpoint_url=f"http://{os.environ.get('MINIO_ENDPOINT', 'minio:9000')}",
+        aws_access_key_id=os.environ.get("MINIO_ACCESS_KEY"),
+        aws_secret_access_key=os.environ.get("MINIO_SECRET_KEY"),
+    )
+
+    datasets = []
+    try:
+        response = minio.list_objects_v2(Bucket="synapseos", Prefix="datasets/")
+        for obj in response.get("Contents", []):
+            datasets.append({
+                "key": obj["Key"],
+                "size": obj["Size"],
+                "last_modified": obj["LastModified"].isoformat(),
+            })
+    except Exception:
+        pass
+
+    return {"datasets": datasets}

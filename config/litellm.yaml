@@ -28,7 +28,7 @@ model_list:
       api_key: "os.environ/ANTHROPIC_API_KEY"
 
   # BYOK — tenant brings own key, injected dynamically by TenantMiddleware
-  # Tenants can use ANY provider: Groq, OpenRouter, Anthropic, z.ai API, etc.
+  # Tenants can use ANY provider supported by LiteLLM: Groq, OpenRouter, Anthropic, etc.
 
 router_settings:
   routing_strategy: "latency-based-routing"
