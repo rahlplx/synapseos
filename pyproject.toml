@@ -1,0 +1,9 @@
+[project]
+name = "synapseos"
+version = "1.0.0"
+description = "Self-improving BYOK RAG platform with cognitive engine"
+requires-python = ">=3.11"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

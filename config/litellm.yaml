@@ -1,0 +1,52 @@
+# LiteLLM — z.ai primary + Groq/OpenRouter/Anthropic fallback
+model_list:
+  # z.ai FREE models (primary for classification, reflection, mem0)
+  - model_name: "zai-flash"
+    litellm_params:
+      model: "openai/glm-4.7-flash"
+      api_base: "https://api.z.ai/api/paas/v4/"
+      api_key: "os.environ/ZAI_API_KEY"
+
+  # z.ai flagship (generation)
+  - model_name: "zai-flagship"
+    litellm_params:
+      model: "openai/glm-5.1"
+      api_base: "https://api.z.ai/api/paas/v4/"
+      api_key: "os.environ/ZAI_API_KEY"
+
+  # Groq fallback
+  - model_name: "groq-fast"
+    litellm_params:
+      model: "groq/llama-3.1-8b-instant"
+      api_key: "os.environ/GROQ_API_KEY"
+
+  # OpenRouter fallback
+  - model_name: "openrouter-fast"
+    litellm_params:
+      model: "openrouter/meta-llama/llama-3.1-8b-instruct"
+      api_key: "os.environ/OPENROUTER_API_KEY"
+
+  # Anthropic last resort
+  - model_name: "anthropic-fallback"
+    litellm_params:
+      model: "anthropic/claude-haiku-4-5"
+      api_key: "os.environ/ANTHROPIC_API_KEY"
+
+router_settings:
+  routing_strategy: "latency-based-routing"
+  num_retries: 1
+  timeout: 30
+  fallbacks:
+    - {"zai-flagship": ["groq-fast", "openrouter-fast", "anthropic-fallback"]}
+
+litellm_settings:
+  forward_llm_provider_auth_headers: true   # BYOK pass-through
+  cache: true
+  cache_params:
+    type: redis
+    host: keydb
+    port: 6379
+    semantic_cache:
+      enabled: true
+      embedding_model: "BAAI/bge-base-en-v1.5"
+      similarity_threshold: 0.92

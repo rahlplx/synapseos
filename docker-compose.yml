@@ -1,0 +1,114 @@
+version: "3.9"
+
+x-logging: &logging
+  driver: "json-file"
+  options: { max-size: "10m", max-file: "3" }
+
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.13.5
+    restart: unless-stopped
+    ports: ["6333:6333"]
+    volumes:
+      - qdrant_data:/var/lib/qdrant/storage
+      - ./config/qdrant.yaml:/qdrant/config/production.yaml
+    environment:
+      - QDRANT__STORAGE__PERFORMANCE__ASYNC_SCORER=true
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: "4G" }
+        reservations: { memory: "1G" }
+    logging: *logging
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=synapseos
+      - POSTGRES_USER=synapse
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init.sql
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: "2G" }
+    logging: *logging
+
+  keydb:
+    image: eqalpha/keydb:latest
+    restart: unless-stopped
+    ports: ["6379:6379"]
+    volumes:
+      - keydb_data:/data
+      - ./config/keydb.conf:/etc/keydb/keydb.conf
+    command: keydb-server /etc/keydb/keydb.conf
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: "1.5G" }
+    logging: *logging
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    ports: ["9000:9000", "9001:9001"]
+    environment:
+      - MINIO_ROOT_USER=${MINIO_USER}
+      - MINIO_ROOT_PASSWORD=${MINIO_PASSWORD}
+    volumes: [minio_data:/data]
+    command: server /data --console-address ":9001"
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: "1G" }
+    logging: *logging
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main-latest
+    restart: unless-stopped
+    ports: ["4000:4000"]
+    volumes: ["./config/litellm.yaml:/app/config.yaml"]
+    environment:
+      - REDIS_URL=redis://keydb:6379
+      - ZAI_API_KEY=${ZAI_API_KEY}
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+    command: --config /app/config.yaml --port 4000
+    depends_on: [keydb]
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: "512M" }
+    logging: *logging
+
+  api:
+    build: { context: ., dockerfile: Dockerfile }
+    restart: unless-stopped
+    ports: ["8000:8000"]
+    env_file: [.env]
+    depends_on: [postgres, qdrant, keydb, minio, litellm]
+    deploy:
+      resources:
+        limits: { cpus: "3.0", memory: "6G" }
+        reservations: { cpus: "0.5", memory: "1.5G" }
+    logging: *logging
+
+  langfuse:
+    image: langfuse/langfuse:3
+    restart: unless-stopped
+    ports: ["3100:3000"]
+    environment:
+      - DATABASE_URL=postgresql://synapse:${POSTGRES_PASSWORD}@postgres:5432/langfuse
+      - NEXTAUTH_SECRET=${LANGFUSE_NEXTAUTH_SECRET}
+      - SALT=${LANGFUSE_SALT}
+      - NEXTAUTH_URL=http://localhost:3100
+    depends_on: [postgres]
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: "2.5G" }
+    logging: *logging
+
+volumes:
+  qdrant_data:
+  pg_data:
+  keydb_data:
+  minio_data:

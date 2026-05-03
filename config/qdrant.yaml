@@ -1,0 +1,16 @@
+storage:
+  storage_path: /var/lib/qdrant/storage
+  snapshots_path: /var/lib/qdrant/snapshots
+  performance:
+    max_search_threads: 4
+    async_scorer: true          # ARM io_uring optimization
+  optimizers:
+    default_segment_number: 2
+    memmap_threshold_kb: 50000   # ARM mmap — keeps RAM low
+    indexing_threshold_kb: 100000
+    max_segment_size_kb: 65536
+  hnsw_index:
+    m: 16
+    ef_construct: 100
+    full_scan_threshold_kb: 10000
+    max_indexing_threads: 4

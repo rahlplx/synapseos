@@ -1,0 +1,48 @@
+# Environment — NEVER commit
+.env
+.env.local
+.env.production
+*.key
+*.pem
+secrets/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+
+# Node
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Data — never commit vectors or datasets
+*.jsonl
+*.parquet
+data/
+datasets/
+
+# IDE
+.cursor/
+.idea/
+.vscode/
+*.swp
+
+# Docker volumes
+qdrant_data/
+pg_data/
+keydb_data/
+minio_data/
+
+# Misc
+.DS_Store
+*.log
+tmp/
