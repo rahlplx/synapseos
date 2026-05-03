@@ -1,16 +1,14 @@
 """
 L7 — Memory (mem0 + KeyDB session)
-mem0 uses existing Qdrant (synapse_memory collection) + PostgreSQL — zero new infra.
-z.ai glm-4.5-flash (FREE) used as mem0 LLM judge for memory extraction.
+mem0 uses Qdrant (synapse_memory collection) + PostgreSQL.
+LLM judge = Groq Llama-8b (fast, free tier) — NOT z.ai API.
 """
 import os
-import json
 from mem0 import Memory
 import redis.asyncio as redis
 
 keydb = redis.from_url(os.environ.get("KEYDB_URL", "redis://keydb:6379"))
 
-# mem0 config — uses existing stack infrastructure
 mem0_config = {
     "vector_store": {
         "provider": "qdrant",
@@ -22,11 +20,10 @@ mem0_config = {
         },
     },
     "llm": {
-        "provider": "openai",  # mem0 uses OpenAI-compatible — point to z.ai
+        "provider": "groq",
         "config": {
-            "model": "glm-5.1",            # FREE z.ai model
-            "openai_base_url": "https://api.z.ai/api/paas/v4/",
-            "api_key": os.environ.get("ZAI_API_KEY", ""),
+            "model": "llama-3.1-8b-instant",
+            "api_key": os.environ.get("GROQ_API_KEY", ""),
         },
     },
     "embedder": {
@@ -40,7 +37,6 @@ memory = Memory.from_config(mem0_config)
 
 
 async def load_memories(user_id: str, tenant_id: str, query: str) -> str:
-    """Recall relevant long-term facts for this query."""
     try:
         results = memory.search(query=query, user_id=f"{tenant_id}:{user_id}", limit=5)
         if not results.get("results"):
@@ -52,15 +48,13 @@ async def load_memories(user_id: str, tenant_id: str, query: str) -> str:
 
 
 async def write_memory(user_id: str, tenant_id: str, messages: list[dict]):
-    """Extract and store important facts from this conversation turn."""
     try:
         memory.add(messages=messages, user_id=f"{tenant_id}:{user_id}", metadata={"tenant_id": tenant_id})
     except Exception:
-        pass  # non-blocking — memory write failure must not break response
+        pass
 
 
 async def load_session(session_id: str, window: int = 10) -> list[dict]:
-    """Load last N turns from KeyDB."""
     raw = await keydb.lrange(f"session:{session_id}", -(window * 2), -1)
     turns = []
     for i in range(0, len(raw) - 1, 2):
@@ -69,6 +63,5 @@ async def load_session(session_id: str, window: int = 10) -> list[dict]:
 
 
 async def append_session(session_id: str, role: str, content: str):
-    """Append turn. Expires after 24h."""
     await keydb.rpush(f"session:{session_id}", role, content)
     await keydb.expire(f"session:{session_id}", 86400)

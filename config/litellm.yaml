@@ -1,39 +1,45 @@
-# LiteLLM — z.ai GLM-5.1 primary everywhere + fallback chain
-model_list:
-  # z.ai GLM-5.1 — ALL tasks (generation, classification, reflection, mem0 judge)
-  - model_name: "default"
-    litellm_params:
-      model: "openai/glm-5.1"
-      api_base: "https://api.z.ai/api/paas/v4/"
-      api_key: "os.environ/ZAI_API_KEY"
+# LiteLLM — SynapseOS platform routing
+# z.ai web app = Rahul's coding tool (separate)
+# This config = SynapseOS runtime LLM routing
 
-  # Groq fallback
-  - model_name: "fallback-1"
+model_list:
+  # Platform default (free Groq tier — 6000 RPM for 8b model)
+  - model_name: "fast"
     litellm_params:
       model: "groq/llama-3.1-8b-instant"
       api_key: "os.environ/GROQ_API_KEY"
 
-  # OpenRouter fallback
-  - model_name: "fallback-2"
+  # Generation quality (Groq 70b)
+  - model_name: "quality"
+    litellm_params:
+      model: "groq/llama-3.1-70b-versatile"
+      api_key: "os.environ/GROQ_API_KEY"
+
+  # Fallback 1
+  - model_name: "fallback-1"
     litellm_params:
       model: "openrouter/meta-llama/llama-3.1-8b-instruct"
       api_key: "os.environ/OPENROUTER_API_KEY"
 
-  # Anthropic last resort
-  - model_name: "fallback-3"
+  # Fallback 2
+  - model_name: "fallback-2"
     litellm_params:
       model: "anthropic/claude-haiku-4-5"
       api_key: "os.environ/ANTHROPIC_API_KEY"
+
+  # BYOK — tenant brings own key, injected dynamically by TenantMiddleware
+  # Tenants can use ANY provider: Groq, OpenRouter, Anthropic, z.ai API, etc.
 
 router_settings:
   routing_strategy: "latency-based-routing"
   num_retries: 1
   timeout: 30
   fallbacks:
-    - {"default": ["fallback-1", "fallback-2", "fallback-3"]}
+    - {"quality": ["fallback-1", "fallback-2"]}
+    - {"fast": ["fallback-1", "fallback-2"]}
 
 litellm_settings:
-  forward_llm_provider_auth_headers: true
+  forward_llm_provider_auth_headers: true   # BYOK pass-through
   cache: true
   cache_params:
     type: redis
