@@ -31,7 +31,7 @@ data/
 datasets/
 
 # IDE
-.cursor/
+# .cursor/
 .idea/
 .vscode/
 *.swp
@@ -46,3 +46,4 @@ minio_data/
 .DS_Store
 *.log
 tmp/
+# Keep .cursor/rules for AI coding tools

@@ -1,0 +1,52 @@
+---
+description: SynapseOS locked stack and ARM deployment rules. Apply to ALL files in this repo.
+globs: ["**/*.py", "**/*.ts", "**/*.yaml", "**/*.yml", "**/*.toml", "**/*.json"]
+alwaysApply: true
+---
+
+# SynapseOS Stack Rules
+
+## Locked Stack
+These are non-negotiable. Never suggest alternatives.
+
+| Component | Package | Version |
+|---|---|---|
+| Runtime | FastAPI + Uvicorn | 0.115+ |
+| Vector DB | Qdrant | 1.13.5+ |
+| Embeddings | fastembed BAAI/bge-base-en-v1.5 | 0.4.2+ |
+| LLM Router | LiteLLM | 1.82.9+ |
+| Memory | mem0ai | 0.1.100+ |
+| Scraper | Crawl4AI | 0.4.3+ |
+| Parser | Docling | 2.19.0+ |
+| Evaluator | RAGAS | 0.2.15 |
+| Optimizer | DSPy | 2.5.20+ |
+| Observability | Langfuse | v3.0+ |
+| Cache | KeyDB | 6.3.4+ |
+| Storage | MinIO | latest |
+| MCP | FastMCP | 2.2.9+ |
+| Edge | Cloudflare Workers | - |
+
+## ARM CPU Constants
+```python
+OMP_NUM_THREADS = 4
+EMBED_BATCH_INGEST = 64
+EMBED_BATCH_QUERY = 16
+RERANK_MAX_DOCS = 15
+DOCLING_CONCURRENCY = 1
+QDRANT_MEMMAP_KB = 50000
+```
+
+## LLM Models (Groq)
+- Quality generation: `groq/llama-3.1-70b-versatile`
+- Fast tasks: `groq/llama-3.1-8b-instant`
+- Fallback 1: `openrouter/meta-llama/llama-3.1-8b-instruct`
+- Fallback 2: `anthropic/claude-haiku-4-5`
+
+## Qdrant Collections
+- `synapse_knowledge` — document RAG vectors
+- `synapse_memory` — mem0 user memory vectors
+
+## Security
+- Tenant BYOK keys → Fernet AES-256 encrypted in PostgreSQL
+- All API keys → `os.environ["KEY_NAME"]`
+- tenant_id payload filter on EVERY Qdrant query

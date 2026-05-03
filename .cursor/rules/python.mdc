@@ -1,0 +1,68 @@
+---
+description: Python coding rules for SynapseOS FastAPI backend
+globs: ["**/*.py"]
+alwaysApply: true
+---
+
+# Python Rules
+
+## Always
+- `async def` for all route handlers and service functions
+- `os.environ.get("KEY", "default")` for optional env vars
+- `os.environ["KEY"]` for required env vars (fail fast if missing)
+- Type hints on all function signatures
+- Docstring on all classes and public functions
+- `asyncio.gather()` for parallel async operations
+- `asyncio.create_task()` for fire-and-forget (memory writes, logging)
+- Full imports at top — never `import *`
+
+## Never
+- `time.sleep()` in async code — use `await asyncio.sleep()`
+- Sync DB calls in async routes — use asyncpg
+- `print()` for logging — use Python logging module
+- Hardcode any API key, password, or secret
+- Use `eval()` except in the calculate tool (with safety check)
+- Import z.ai SDK in runtime files
+
+## FastAPI Patterns
+```python
+# Route handler
+@router.post("/endpoint")
+async def handler(body: RequestModel, request: Request):
+    tenant_id = request.state.tenant_id  # set by TenantMiddleware
+    api_key = request.state.litellm_api_key  # set by TenantMiddleware
+    ...
+
+# SSE streaming
+async def stream_generator():
+    async for chunk in generate_stream(...):
+        yield chunk
+
+return StreamingResponse(stream_generator(), media_type="text/event-stream")
+```
+
+## Qdrant Pattern (always include tenant filter)
+```python
+tenant_filter = models.Filter(
+    must=[models.FieldCondition(
+        key="tenant_id",
+        match=models.MatchValue(value=tenant_id)
+    )]
+)
+```
+
+## Error Handling
+```python
+try:
+    result = await risky_operation()
+except Exception as e:
+    # Log but don't crash the request
+    logger.error(f"Operation failed: {e}")
+    return fallback_value
+```
+
+## ARM-Specific Imports
+```python
+import os
+os.environ.setdefault("OMP_NUM_THREADS", "4")  # Must be before fastembed import
+```
