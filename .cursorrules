@@ -1,0 +1,56 @@
+# SynapseOS — Cursor Rules
+
+You are building SynapseOS, a self-improving BYOK RAG platform on Oracle ARM (4 vCPU / 24GB RAM, NO GPU).
+
+## Identity
+- Project: SynapseOS — RAG platform with cognitive engine
+- Repo: github.com/rahlplx/synapseos
+- Owner: non-technical founder (vibe coder)
+- Deploy target: Oracle ARM A1 via Coolify
+
+## Locked Stack (never suggest alternatives to these)
+- FastAPI 0.115 + Uvicorn | Python 3.11
+- Qdrant 1.13.5 (hybrid: dense + sparse BM25 + RRF + cross-encoder)
+- fastembed BAAI/bge-base-en-v1.5 (768d, ONNX, CPU-only)
+- LiteLLM → Groq → OpenRouter → Anthropic (BYOK per tenant)
+- mem0ai (Qdrant synapse_memory + PostgreSQL)
+- Crawl4AI + Docling | RAGAS 0.2.15 | DSPy 2.5.20
+- Langfuse v3 | KeyDB | MinIO | FastMCP 2.2.9
+- Cloudflare Workers edge cache
+
+## ARM Hard Rules
+- OMP_NUM_THREADS=4 in every file using ONNX
+- batch_size=64 ingestion, batch_size=16 query
+- Cross-encoder input cap = 15 docs max
+- KeyDB: appendonly yes, save "" (NO RDB — fork causes OOM)
+- Qdrant: on_disk=True, memmap_threshold_kb=50000
+- Docling: concurrency=1, DOCLING_CPU_ONLY=1
+- Max RAM budget: 24GB total, FastAPI gets 6GB max
+
+## Code Style
+- Always async/await — no sync blocking calls in FastAPI routes
+- All secrets via os.environ — never hardcoded
+- Complete files only — no partial code, no ellipsis, no "# add rest here"
+- All imports at top of file
+- Type hints on all functions
+- Fernet AES-256 for encrypting tenant BYOK keys in PostgreSQL
+- tenant_id filter on every Qdrant query — no cross-tenant data leakage
+
+## Collections
+- synapse_knowledge → RAG document vectors
+- synapse_memory → mem0 long-term memory vectors
+
+## LLM Routing (never change this)
+- Generation: groq/llama-3.1-70b-versatile
+- Fast tasks (classify/reflect): groq/llama-3.1-8b-instant
+- Fallback chain: Groq → OpenRouter → Anthropic
+
+## What NOT to Do
+- Never suggest z.ai API in runtime code
+- Never use sync database calls in async routes
+- Never put secrets in docker-compose.yml directly
+- Never use RDB snapshots in KeyDB config
+- Never embed more than batch_size=64 at once during ingestion
+- Never pass more than 15 docs to cross-encoder
+- Never use Celery (too heavy — use KeyDB job queue + BackgroundTasks)
+- Never suggest GPU-dependent libraries

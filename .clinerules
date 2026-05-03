@@ -1,0 +1,30 @@
+# SynapseOS — Cline/Kilo Code Rules
+
+## What You're Building
+SynapseOS: BYOK RAG platform on Oracle ARM (4 vCPU / 24GB RAM, NO GPU).
+Two endpoints: /v1/query (fast RAG ~235ms) and /v1/think (cognitive engine ~865ms).
+
+## Locked Stack
+FastAPI 0.115 | Qdrant 1.13.5 | fastembed BAAI/bge-base-en-v1.5 |
+LiteLLM (Groq primary) | mem0ai | Crawl4AI | Docling |
+RAGAS 0.2.15 | DSPy 2.5.20 | Langfuse v3 | KeyDB | MinIO | FastMCP
+
+## Hard ARM Rules
+OMP_NUM_THREADS=4 | batch_size=64 ingest / 16 query |
+rerank max 15 docs | KeyDB AOF only no RDB |
+Qdrant on_disk=True | Docling concurrency=1
+
+## Code Standards
+- Always async/await
+- Full files — no truncation
+- All secrets via os.environ
+- tenant_id filter on all Qdrant queries
+- Fernet AES-256 for BYOK key storage
+
+## File Map
+src/api/ → routes + middleware
+src/core/ → retrieval, generation, ingestion
+src/cognitive/ → engine, memory, tools, reflection, planner
+sdk/ → Python + TypeScript clients
+mcp/ → FastMCP server
+cloudflare/ → Workers edge proxy

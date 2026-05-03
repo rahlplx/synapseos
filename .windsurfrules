@@ -1,0 +1,35 @@
+# SynapseOS — Windsurf Rules
+
+## Project
+SynapseOS: self-improving BYOK RAG platform with cognitive engine.
+Deploy: Oracle ARM A1 (4 vCPU / 24GB RAM, NO GPU) via Coolify.
+
+## Stack (locked — never suggest alternatives)
+FastAPI | Qdrant 1.13.5 | fastembed bge-base-en-v1.5 768d |
+LiteLLM → Groq → OpenRouter → Anthropic |
+mem0ai | Crawl4AI | Docling | RAGAS | DSPy | Langfuse |
+KeyDB | MinIO | FastMCP | Cloudflare Workers
+
+## ARM Rules (non-negotiable)
+- OMP_NUM_THREADS=4 always before fastembed import
+- batch_size=64 ingestion, 16 query
+- Cross-encoder: max 15 docs input
+- KeyDB: AOF only, NO RDB (save "")
+- Qdrant: on_disk=True, memmap_threshold_kb=50000
+- Docling: concurrency=1, DOCLING_CPU_ONLY=1
+
+## Code Requirements
+- All async — no sync blocking in FastAPI
+- Complete files only — never partial code or ellipsis
+- All imports explicit at top
+- Type hints required
+- API keys from os.environ only
+- Fernet encryption for BYOK tenant keys
+- tenant_id filter on every Qdrant query
+
+## Collections
+synapse_knowledge = RAG | synapse_memory = mem0
+
+## LLM
+Generation: groq/llama-3.1-70b-versatile
+Fast: groq/llama-3.1-8b-instant

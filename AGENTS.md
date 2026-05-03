@@ -1,243 +1,149 @@
 # AGENTS.md — SynapseOS Build Context
 
-> This file is the single source of truth for any AI coding agent (Claude Code, Cursor, Windsurf, Cline, Kilo Code) working on this repo.
-> Read this FIRST before touching any file. Update the Session Log at the bottom after every build session.
+> Read this completely before touching any code.
+> Single source of truth for all AI coding agents.
+> Append to Session Log after every build session.
 
 ---
 
-## What Is SynapseOS
+## Project
 
-Standalone BYOK RAG platform with cognitive engine. Integrates with any app via REST API, Python SDK, TypeScript SDK, or MCP server.
+SynapseOS — standalone self-improving BYOK RAG platform with cognitive engine.
+Integrates via REST API, Python SDK, TypeScript SDK, or MCP server.
 
-**Two endpoints:**
-- `POST /v1/query` — fast hybrid RAG (~235ms, no memory)
-- `POST /v1/think` — full cognitive engine (memory + multi-step reasoning + tool use + self-reflection, ~865ms)
-
----
-
-## Locked Stack — Never Suggest Alternatives
-
-| Component | Value |
-|---|---|
-| Runtime | FastAPI + Uvicorn |
-| Vector DB | Qdrant 1.13.5+ |
-| Embeddings | fastembed BAAI/bge-base-en-v1.5 (768d) |
-| LLM Router | LiteLLM (Groq → OpenRouter → Anthropic fallback) |
-| LLM Provider | z.ai GLM models (OpenAI-compatible, base_url=https://api.z.ai/api/paas/v4/) |
-| Cache + Queue | KeyDB (Redis-compatible) |
-| Object Store | MinIO |
-| Memory | mem0ai (Qdrant + PostgreSQL backend) |
-| Scraper | Crawl4AI |
-| Parser | Docling |
-| Evaluator | RAGAS 0.2.15 |
-| Optimizer | DSPy 2.5.20+ MIPROv2 |
-| Observability | Langfuse v3 self-hosted |
-| Edge | Cloudflare Workers |
-| Deploy | Coolify on Oracle ARM (4 vCPU / 24GB RAM, no GPU) |
-| MCP | FastMCP 2.2.9+ |
-
-**z.ai SDK usage:**
-```python
-# Always use z.ai SDK where possible
-from zai import ZaiClient
-client = ZaiClient(api_key=os.environ["ZAI_API_KEY"])
-
-# Or via LiteLLM (OpenAI-compatible)
-from litellm import acompletion
-response = await acompletion(
-    model="openai/glm-4.7-flash",           # FREE model
-    api_base="https://api.z.ai/api/paas/v4/",
-    api_key=os.environ["ZAI_API_KEY"],
-    messages=[...]
-)
-```
-
-**z.ai model — glm-5.1 everywhere:**
-- `glm-4.7-flash` — FREE, use for classification + reflection
-- `glm-5.1 (mem0 judge) judge)
-- `glm-5.1` — paid flagship, use for complex generation only
+Repo: github.com/rahlplx/synapseos
+Owner: Rahul Paul (non-technical founder)
+Deploy: Oracle ARM A1 — 4 vCPU / 24GB RAM — Coolify — NO GPU
 
 ---
 
-## Project Architecture — 7 Layers
+## Two Endpoints
 
-```
-L1 Ingest: Crawl4AI → Docling → SemanticChunker → SHA256 dedup → fastembed → Qdrant + MinIO + PG
-L2 Retrieval: Dense (768d) + BM25 sparse → RRF fusion → cross-encoder rerank → top 5
-L3 Generation: LiteLLM → z.ai/Groq/OpenRouter/Anthropic fallback → SSE streaming
-L4 Intelligence: RAGAS nightly → SFT/DPO JSONL → DSPy MIPROv2 prompt optimizer
-L5 Integration: REST API + Python SDK + TypeScript SDK + FastMCP
-L6 Edge: Cloudflare Workers (SHA-256 KV cache, scales-to-zero)
-L7 Cognitive: mem0 memory + DSPy ReAct reasoning + Tool executor + Self-reflection
-```
+POST /v1/query  → Fast RAG (~235ms): hybrid retrieve + generate + reflect
+POST /v1/think  → Cognitive (~865ms): memory + reasoning + tools + reflect
+
+---
+
+## Locked Stack
+
+FastAPI 0.115 | Qdrant 1.13.5 | fastembed BAAI/bge-base-en-v1.5 768d ONNX |
+LiteLLM → Groq → OpenRouter → Anthropic | mem0ai | Crawl4AI | Docling |
+RAGAS 0.2.15 | DSPy 2.5.20 | Langfuse v3 | KeyDB | MinIO | FastMCP 2.2.9 |
+Cloudflare Workers | Coolify
+
+---
+
+## ARM CPU Rules
+
+OMP_NUM_THREADS=4 before every fastembed import
+batch_size=64 ingestion / 16 query embedding
+cross-encoder input cap = 15 docs HARD LIMIT
+KeyDB: appendonly yes + save "" (NO RDB — fork causes OOM)
+Qdrant: on_disk=True, memmap_threshold_kb=50000
+Docling: concurrency=1, DOCLING_CPU_ONLY=1
+
+---
+
+## Collections
+
+synapse_knowledge = RAG document vectors (768d dense + BM25 sparse)
+synapse_memory    = mem0 user memory vectors (768d dense)
+
+---
+
+## LLM Routing
+
+Generation:  groq/llama-3.1-70b-versatile
+Fast tasks:  groq/llama-3.1-8b-instant (classify, reflect, mem0 judge)
+Fallback 1:  openrouter/meta-llama/llama-3.1-8b-instruct
+Fallback 2:  anthropic/claude-haiku-4-5
+BYOK:        tenant key injected by TenantMiddleware from PostgreSQL (Fernet AES-256)
 
 ---
 
 ## File Structure
 
-```
-synapseos/
-├── AGENTS.md                    ← THIS FILE — read first
-├── README.md
-├── .gitignore
-├── .env.example                 ← copy to .env, fill values
-├── docker-compose.yml           ← full stack
-├── requirements.txt
-├── pyproject.toml
-│
-├── docs/
-│   ├── architecture.md          ← full technical spec (L1-L6)
-│   ├── cognitive.md             ← L7 cognitive engine spec
-│   ├── prd.md                   ← product requirements
-│   ├── api.md                   ← API reference
-│   └── devops.md                ← deployment guide
-│
-├── src/
-│   ├── api/
-│   │   ├── main.py              ← FastAPI app entry point
-│   │   ├── middleware/
-│   │   │   ├── tenant.py        ← TenantMiddleware (rate limit + BYOK inject)
-│   │   │   └── langfuse_mw.py   ← Langfuse trace middleware
-│   │   └── routes/
-│   │       ├── query.py         ← POST /v1/query
-│   │       ├── think.py         ← POST /v1/think (cognitive)
-│   │       ├── ingest.py        ← POST /v1/ingest, GET /v1/ingest/{job_id}
-│   │       ├── feedback.py      ← POST /v1/feedback
-│   │       └── collections.py   ← GET /v1/collections, DELETE /v1/documents/{id}
-│   │
-│   ├── core/
-│   │   ├── retrieval.py         ← hybrid_query (dense+BM25+RRF+rerank)
-│   │   ├── generation.py        ← generate() via LiteLLM z.ai routing
-│   │   └── ingestion.py         ← scrape + parse + chunk + embed + upsert
-│   │
-│   ├── cognitive/
-│   │   ├── engine.py            ← cognitive_query() orchestrator
-│   │   ├── memory.py            ← mem0 long-term + KeyDB session memory
-│   │   ├── tools.py             ← ToolRegistry + ToolExecutor (4 built-ins)
-│   │   ├── reflection.py        ← reflect_and_refine() inline judge
-│   │   └── planner.py           ← classify_query() + SynapseReAct (DSPy)
-│   │
-│   └── worker/
-│       ├── ingestion_worker.py  ← KeyDB job queue consumer
-│       └── nightly_optimizer.py ← APScheduler: RAGAS → DSPy MIPROv2
-│
-├── sdk/
-│   ├── python/
-│   │   ├── synapseos/
-│   │   │   ├── __init__.py
-│   │   │   └── client.py        ← AsyncSynapseClient
-│   │   └── pyproject.toml
-│   └── typescript/
-│       ├── src/
-│       │   └── index.ts         ← SynapseOSClient (SvelteKit-compatible)
-│       └── package.json
-│
-├── mcp/
-│   └── synapse_mcp.py           ← FastMCP server (Claude Code/Cursor/Windsurf)
-│
-├── cloudflare/
-│   └── worker.ts                ← Edge proxy + KV cache
-│
-├── config/
-│   ├── qdrant.yaml              ← ARM mmap config
-│   ├── litellm.yaml             ← z.ai + Groq + OpenRouter + Anthropic routes
-│   └── keydb.conf               ← AOF, no RDB, 1.5GB cap
-│
-└── scripts/
-    ├── init-db.sql              ← PostgreSQL schema
-    ├── init-minio.sh            ← MinIO bucket setup
-    └── healthcheck.sh           ← verify all services green
-```
+src/api/main.py                 FastAPI app entry
+src/api/middleware/tenant.py    Rate limit + BYOK inject (runs before every route)
+src/api/middleware/langfuse_mw.py  Trace every request
+src/api/routes/query.py         POST /v1/query
+src/api/routes/think.py         POST /v1/think
+src/api/routes/ingest.py        POST /v1/ingest
+src/api/routes/feedback.py      POST /v1/feedback
+src/api/routes/collections.py   GET /v1/collections
+src/core/retrieval.py           hybrid_query — dense+BM25+RRF+rerank
+src/core/generation.py          LiteLLM/Groq generation + fast_complete + HyDE
+src/core/ingestion.py           Crawl4AI + Docling + chunk + embed + upsert
+src/cognitive/engine.py         cognitive_query orchestrator
+src/cognitive/memory.py         mem0 long-term + KeyDB session
+src/cognitive/tools.py          ToolExecutor (retrieve/web_search/calculate/call_api)
+src/cognitive/reflection.py     reflect_and_refine (Groq judge)
+src/cognitive/planner.py        classify_query + SynapseReAct (DSPy)
+src/worker/nightly_optimizer.py RAGAS score + DSPy MIPROv2 at 02:00 UTC
+sdk/python/synapseos/client.py  AsyncSynapseClient
+sdk/typescript/src/index.ts     SynapseOSClient
+mcp/synapse_mcp.py              FastMCP server
+cloudflare/worker.ts            Edge proxy + KV cache
+cloudflare/wrangler.toml        Cloudflare deploy config
+config/qdrant.yaml              ARM mmap config
+config/litellm.yaml             LLM routing + semantic cache
+config/keydb.conf               AOF config
+scripts/init-db.sql             PostgreSQL schema
+scripts/init-minio.sh           MinIO bucket setup
+scripts/healthcheck.sh          Verify all services
 
 ---
 
-## Build Order (Phase 1 → Phase 3)
+## Agent Rules Files
 
-### Phase 1 — Core RAG (Hrittik builds first)
-```
-Week 1: Docker Compose up → all services healthy
-Week 2: L1 Ingest working (Crawl4AI + Docling + fastembed → Qdrant)
-Week 3: L2 Retrieval working (hybrid query endpoint live)
-Week 4: L3 Generation working (/v1/query with z.ai streaming)
-```
-
-### Phase 2 — SDK + MCP
-```
-Week 5: Python SDK published, TypeScript SDK published
-Week 6: FastMCP server live (Claude Code + Cursor plugged in)
-Week 7: Cloudflare Workers edge deployed
-```
-
-### Phase 3 — Cognitive Engine
-```
-Week 8:  mem0 memory (session + long-term)
-Week 9:  Self-reflection (reflect_and_refine)
-Week 10: Tool registry + executor
-Week 11: DSPy ReAct planner + full /v1/think endpoint
-```
+CLAUDE.md               Claude Code
+.cursorrules            Cursor (legacy)
+.cursor/rules/          Cursor MDC (new format)
+.windsurfrules          Windsurf
+.clinerules             Cline / Kilo Code
+.github/copilot-instructions.md  GitHub Copilot
 
 ---
 
-## Critical Rules for Agents
+## Do Not Do
 
-1. **Never commit `.env`** — only `.env.example` with placeholder values
-2. **Never commit API keys** — all keys via environment variables
-3. **OMP_NUM_THREADS=4** always set for ONNX models on ARM
-4. **Docling worker concurrency = 1** — prevents OOM on 24GB ARM
-5. **Qdrant batch_size=64** ingestion, **16** real-time query
-6. **Cross-encoder input cap = 15 docs** — 30+ causes ARM timeout
-7. **KeyDB: AOF only, no RDB** — fork() causes OOM
-8. **Use z.ai glm-5.1 (everywhere) for** classification, reflection, mem0 judge
-9. **Use z.ai glm-5.1 for** complex generation (only when BYOK key available)
-10. **mem0 collection name = `synapse_memory`** (separate from `synapse_knowledge`)
-
----
-
-## z.ai SDK Integration Patterns
-
-### LiteLLM config for z.ai (add to litellm.yaml)
-```yaml
-model_list:
-  - model_name: "zai-flash"
-    litellm_params:
-      model: "openai/glm-4.7-flash"
-      api_base: "https://api.z.ai/api/paas/v4/"
-      api_key: "os.environ/ZAI_API_KEY"
-  - model_name: "zai-flagship"
-    litellm_params:
-      model: "openai/glm-5.1"
-      api_base: "https://api.z.ai/api/paas/v4/"
-      api_key: "os.environ/ZAI_API_KEY"
-```
-
-### Direct z.ai SDK (async)
-```python
-import asyncio
-from zai import AsyncZaiClient
-
-async def zai_complete(prompt: str, model: str = "glm-4.7-flash") -> str:
-    client = AsyncZaiClient(api_key=os.environ["ZAI_API_KEY"])
-    response = await client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    return response.choices[0].message.content
-```
+Never suggest z.ai API in runtime code
+Never use sync calls in async FastAPI routes
+Never hardcode secrets
+Never pass more than 15 docs to cross-encoder
+Never run Docling with concurrency more than 1
+Never query Qdrant without tenant_id filter
+Never store BYOK keys in plaintext
+Never use RDB snapshots in KeyDB (save "")
+Never use Celery — use KeyDB + BackgroundTasks
 
 ---
 
-## Session Memory Log
+## Build Phase Status
 
-> Agents: append your session summary here after every build session.
-> Format: `## Session YYYY-MM-DD — What was built`
+Phase 1 Core RAG (Days 1-4)
+  Day 1: Docker services live
+  Day 2: Qdrant + ingest
+  Day 3: Hybrid query
+  Day 4: /v1/query endpoint
 
-## Session 2026-05-04 — Initial repo scaffold
-- Created full directory structure
-- Added all 5 docs (architecture, prd, api, devops, cognitive)
-- Added AGENTS.md, README, .gitignore, .env.example
-- Added docker-compose.yml, config files, scripts
-- Added src/ skeleton (all modules stubbed)
-- Added SDK stubs (Python + TypeScript)
-- Added MCP server, Cloudflare Worker
-- Status: Scaffold complete. Phase 1 build ready for Hrittik.
-- Next: `docker compose up` → verify all services → start L1 ingest
+Phase 2 SDK + Edge (Days 5-8)
+  Day 5: Python SDK
+  Day 6: TypeScript SDK + widget
+  Day 7: MCP server
+  Day 8: Cloudflare Workers
+
+Phase 3 Cognitive (Days 9-12)
+  Day 9: mem0 memory
+  Day 10: Self-reflection
+  Day 11: Tool executor
+  Day 12: /v1/think complete
+
+---
+
+## Session Log
+
+## Session 2026-05-04 — Initial scaffold
+- Built: Complete repo, all docs, Docker, SDKs, MCP, configs
+- Status: Scaffold complete
+- Next: Day 1 — Docker services live
