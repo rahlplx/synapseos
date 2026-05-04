@@ -139,8 +139,9 @@ Phase 3 Cognitive (Days 9-12) — CODE COMPLETE
   Day 11: Tool executor (code complete, 4 tools + safety)
   Day 12: /v1/think complete (code complete, 3 paths)
 
-Current: LOCAL TESTING → CLOUD DEPLOY LATER
-  All code is import-clean and ready for local testing with Docker infra.
+Current: LOCAL TESTING (27 tests passing) → CLOUD DEPLOY LATER
+  27 in-memory integration tests pass without Docker/PG/Redis/MinIO/LLM.
+  Run: `python3 -m pytest tests/test_local_core.py tests/test_extended.py -v`
 
 ---
 
@@ -222,3 +223,32 @@ Quick start: `./scripts/setup-local.sh` (automates steps 1-6)
   - test_retrieval.py used as_object() which doesn't exist — replaced with SparseVector
 - Status: ✅ Code complete and import-clean for local testing
 - Next: Start Docker infra → run test scripts → verify end-to-end on localhost
+
+## Session 2026-05-04 — In-Memory Test Harness + 27 Integration Tests
+- Built: Full in-memory test harness + comprehensive integration test suite
+- Strategy: Local-first testing without Docker/PG/Redis/MinIO/LLM APIs
+- Files changed:
+  - requirements.txt: Added tiktoken for semantic chunking
+  - src/core/ingestion.py: Fixed semchunk API (SemanticChunker → chunk() + tiktoken)
+  - tests/local_harness/__init__.py: Created
+  - tests/local_harness/patches.py: Complete in-memory harness (fakeredis, aiosqlite, mock LLM, mock MinIO)
+  - tests/local_harness/conftest.py: Pytest fixtures for in-memory services
+  - tests/conftest.py: Updated with harness initialization
+  - tests/test_local_core.py: 10 core integration tests (all passing)
+  - tests/test_extended.py: 17 extended tests (all passing)
+- Test results: 27/27 passing
+  - Ingestion: embed+upsert, SHA-256 dedup, semantic chunking, PG records
+  - Retrieval: hybrid query (dense+sparse+RRF+rerank)
+  - API: /v1/query (stream+non-stream), /v1/think (stream+non-stream), /health
+  - Memory: session storage, TTL, write_memory safety
+  - Reflection: good/error answers, max retry enforcement
+  - Tools: calculate (valid, injection blocked, div-by-zero), retrieve_knowledge
+  - Rate limiting: fakeredis sliding window
+  - BYOK: Fernet encryption round-trip
+  - Cognitive engine: full pipeline with fire-and-forget memory writes
+- Bugs fixed:
+  - semchunk API changed: SemanticChunker no longer exists, replaced with chunk() + tiktoken
+  - pytest-asyncio strict mode: async fixtures need @pytest_asyncio.fixture
+  - BaseHTTPMiddleware + HTTPException: raises instead of returning 401 in newer Starlette
+- Status: ✅ 27 integration tests passing, local-first strategy validated
+- Next: Add real GROQ_API_KEY → run with real LLM → deploy to Oracle ARM
