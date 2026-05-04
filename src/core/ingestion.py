@@ -17,6 +17,8 @@ from crawl4ai import AsyncWebCrawler, CrawlerRunConfig, CacheMode
 from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
 from crawl4ai.content_filter_strategy import PruningContentFilter
 import redis.asyncio as redis
+import boto3
+from botocore.client import Config
 
 # ─── Clients ──────────────────────────────────────────────────────────────────
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
@@ -131,6 +133,35 @@ async def embed_and_upsert(chunks: list[str], tenant_id: str, metadata: dict):
     await qdrant.upsert(collection_name=COLLECTION, points=points)
 
 
+
+async def archive_to_minio(tenant_id: str, doc_id: str, raw_content: str, parsed_md: str):
+    """Archive raw + parsed content to MinIO. Fire-and-forget safe."""
+    try:
+        minio = boto3.client(
+            "s3",
+            endpoint_url=f"http://{os.environ.get('MINIO_ENDPOINT', 'minio:9000')}",
+            aws_access_key_id=os.environ.get("MINIO_USER", "synapseos"),
+            aws_secret_access_key=os.environ.get("MINIO_PASSWORD", ""),
+            config=Config(signature_version="s3v4"),
+        )
+        bucket = "synapseos"
+        # Raw
+        minio.put_object(
+            Bucket=bucket,
+            Key=f"{tenant_id}/raw/{doc_id}.txt",
+            Body=raw_content.encode(),
+            ContentType="text/plain",
+        )
+        # Parsed markdown
+        minio.put_object(
+            Bucket=bucket,
+            Key=f"{tenant_id}/parsed/{doc_id}.md",
+            Body=parsed_md.encode(),
+            ContentType="text/markdown",
+        )
+    except Exception:
+        pass  # MinIO failure must never block ingestion
+
 async def ingest_urls(
     urls: list[str],
     tenant_id: str,
@@ -148,6 +179,11 @@ async def ingest_urls(
             # 1. Scrape
             await keydb.hset(f"job:{job_id}", "current_url", url)
             markdown = await scrape_url(url)
+
+            # 1b. Archive raw to MinIO (non-blocking)
+            import asyncio
+            doc_id = str(uuid4())
+            asyncio.create_task(archive_to_minio(tenant_id, doc_id, markdown, markdown))
 
             # 2. Chunk
             chunks = semantic_chunk(markdown)
