@@ -5,9 +5,12 @@ ARM safe: web_search capped at 3000 chars, calculate uses safe eval, call_api ha
 """
 import os
 import json
+import logging
 import httpx
 from crawl4ai import AsyncWebCrawler, CrawlerRunConfig, CacheMode
 from cryptography.fernet import Fernet
+
+logger = logging.getLogger(__name__)
 
 # ─── Built-in Tool Schemas (OpenAI function calling format) ──────────────────
 BUILTIN_SCHEMAS = [
@@ -166,8 +169,8 @@ class ToolExecutor:
                 cipher = Fernet(os.environ["ENCRYPTION_KEY"].encode())
                 auth = cipher.decrypt(tool["auth_header"]).decode()
                 headers["Authorization"] = auth
-            except Exception:
-                pass  # Corrupted encryption — try without auth
+            except Exception as e:
+                logger.warning(f"[security] Fernet decrypt failed for tool '{tool_name}': {type(e).__name__}")
 
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.request(

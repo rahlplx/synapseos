@@ -1,7 +1,8 @@
 """
 L1 — Ingestion Engine
-Crawl4AI → Docling → SemanticChunker → SHA-256 dedup → fastembed → Qdrant + MinIO + PG
+Crawl4AI → Docling → SemanticChunker → SHA-256 dedup → sanitise → fastembed → Qdrant + MinIO + PG
 ARM: Docling concurrency=1, batch_size=64 ingestion, OMP_NUM_THREADS=4
+Security: Prompt injection sanitisation strips known injection patterns before embedding.
 """
 import os
 os.environ.setdefault("OMP_NUM_THREADS", "4")          # ARM CPU tuning — MUST be before fastembed
@@ -272,6 +273,70 @@ def semantic_chunk(text: str, max_tokens: int = 512, overlap: int = 64) -> list[
     return chunks
 
 
+# ─── Prompt Injection Sanitiser ────────────────────────────────────────────────
+# OWASP LLM Top 10: Prompt injection through ingested content is a critical risk
+# for multi-tenant RAG systems. Any tenant can ingest any URL — malicious content
+# in scraped pages becomes an injection vector when retrieved into LLM context.
+
+INJECTION_PATTERNS = [
+    r"ignore\s+(previous|all|above|prior)\s+instructions?",
+    r"system\s*prompt",
+    r"you\s+are\s+now",
+    r"disregard\s+(your|all|previous)\s+(instructions?|rules?)",
+    r"forget\s+(everything|all|what)",
+    r"new\s+(role|persona|identity|instructions?)",
+    r"override\s+(previous|all|safety)\s+(instructions?|rules?|guidelines?)",
+    r"act\s+as\s+(if\s+you\s+(are|were)|a\s+different)",
+    r"jailbreak",
+    r"dan\s+mode",
+    r"developer\s+mode",
+]
+
+import re as _re
+_injection_regex = _re.compile("|".join(INJECTION_PATTERNS), _re.IGNORECASE)
+
+_SANITIZE_LOG = None
+
+
+def _get_sanitize_logger():
+    """Lazy logger to avoid import-time issues."""
+    global _SANITIZE_LOG
+    if _SANITIZE_LOG is None:
+        import logging
+        _SANITIZE_LOG = logging.getLogger(__name__)
+    return _SANITIZE_LOG
+
+
+def sanitise_chunk(text: str, tenant_id: str = "") -> str | None:
+    """Sanitise a chunk for prompt injection patterns.
+
+    Returns None if the chunk contains a likely injection attempt —
+    such chunks should be SKIPPED (not embedded).
+
+    Returns cleaned text with HTML artifacts stripped if the chunk
+    passes the injection check.
+
+    This prevents the OWASP LLM Top 10 vulnerability where malicious
+    content scraped from URLs manipulates the LLM when retrieved.
+    """
+    lower = text.lower()
+
+    # Check for injection patterns
+    if _injection_regex.search(lower):
+        _get_sanitize_logger().warning(
+            f"[security] Prompt injection attempt blocked for tenant={tenant_id}: "
+            f"{text[:100]}..."
+        )
+        return None
+
+    # Strip HTML artifacts that might bypass the markdown parser
+    text = _re.sub(r'<script[^>]*>.*?</script>', '', text, flags=_re.DOTALL | _re.IGNORECASE)
+    text = _re.sub(r'<[^>]+>', '', text)  # Remove remaining HTML tags
+    text = text.strip()
+
+    return text if text else None
+
+
 async def dedup_chunks(chunks: list[str], tenant_id: str) -> list[str]:
     """SHA-256 dedup — check KeyDB set per tenant.
     Prevents re-ingesting identical chunks on repeated scrapes.
@@ -290,9 +355,26 @@ async def embed_and_upsert(chunks: list[str], tenant_id: str, metadata: dict):
     batch_size=64 for ingestion per ARM rules.
     Sparse vectors use models.SparseVector(indices=..., values=...) for
     compatibility with newer qdrant-client API versions.
+    Chunks are sanitised for prompt injection before embedding.
     """
     if not chunks:
         return
+
+    # Sanitise chunks — skip any that contain prompt injection attempts
+    clean_chunks = []
+    for c in chunks:
+        result = sanitise_chunk(c, tenant_id)
+        if result is not None:
+            clean_chunks.append(result)
+        # else: injection attempt blocked and logged — skip embedding
+
+    if not clean_chunks:
+        _get_sanitize_logger().warning(
+            f"[security] All chunks for tenant={tenant_id} blocked by sanitiser"
+        )
+        return
+
+    chunks = clean_chunks
 
     dense_vecs = list(dense_model.embed(chunks, batch_size=INGEST_BATCH_SIZE))
     sparse_vecs = list(sparse_model.embed(chunks, batch_size=INGEST_BATCH_SIZE))
@@ -340,8 +422,10 @@ async def archive_to_minio(tenant_id: str, doc_id: str, raw_content: str, parsed
             Body=parsed_md.encode(),
             ContentType="text/markdown",
         )
-    except Exception:
-        pass  # MinIO failure must never block ingestion
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"[non-critical] archive_to_minio failed: {type(e).__name__}: {e}")
+        # MinIO failure must never block ingestion
 
 async def ingest_urls(
     urls: list[str],
@@ -397,7 +481,10 @@ async def ingest_urls(
             # 8. Update PostgreSQL document record with final chunk count
             await update_document_status(doc_id, "done", chunk_count=len(unique))
 
-            # 9. Log ingestion event to interaction_logs
+            # 9. Extract entities for graph queries (fire-and-forget)
+            asyncio.create_task(_extract_and_store_entities(markdown, tenant_id, doc_id))
+
+            # 10. Log ingestion event to interaction_logs
             await log_interaction(
                 tenant_id=tenant_id,
                 event_type="url_ingest",
@@ -495,3 +582,67 @@ async def ingest_file(
 
     # Set job TTL to 24 hours
     await keydb.expire(f"job:{job_id}", 86400)
+
+
+# ─── Entity Extraction (LazyGraphRAG) ───────────────────────────────────────
+# Lightweight entity extraction for cross-document relationship queries.
+# Uses Groq 8b (~$0.0001 per document) + PostgreSQL — no new infrastructure.
+# Fire-and-forget via asyncio.create_task() — never blocks ingestion.
+
+async def _extract_and_store_entities(text: str, tenant_id: str, doc_id: str):
+    """Extract named entities from text and upsert to entities table.
+
+    Uses Groq 8b for fast entity extraction (~100ms). Results are stored
+    in the PostgreSQL entities table for the 'graph' query type in the
+    cognitive engine.
+
+    This is the LazyGraphRAG pattern: instead of building a full knowledge
+    graph with a dedicated graph database, we use SQL aggregation over
+    entity-document relationships stored in existing PostgreSQL.
+
+    Cost: +1 Groq 8b call per document (~$0.0001). Zero query latency change.
+    """
+    import json
+
+    try:
+        from src.core.generation import fast_complete
+
+        prompt = f"""Extract named entities from this text. Focus on: people, organizations, campaigns, clients, products, metrics, topics.
+Reply JSON only: {{"entities": [{{"name": "entity name", "type": "person|org|campaign|client|product|metric|topic"}}]}}
+
+Text: {text[:3000]}"""
+
+        raw = await fast_complete(prompt, max_tokens=300, json_mode=True)
+        parsed = json.loads(raw)
+        entities = parsed.get("entities", [])
+
+        if not entities:
+            return
+
+        # Upsert entities to PostgreSQL
+        pool = await _get_pg()
+        async with pool.acquire() as conn:
+            for entity in entities[:20]:  # Cap at 20 entities per document
+                name = entity.get("name", "").strip()
+                etype = entity.get("type", "topic").strip()
+                if not name:
+                    continue
+
+                # Upsert: increment mention_count and append doc_id to document_ids
+                await conn.execute("""
+                    INSERT INTO entities (tenant_id, entity_name, entity_type, document_ids, mention_count)
+                    VALUES ($1, $2, $3, ARRAY[$4::uuid], 1)
+                    ON CONFLICT (tenant_id, entity_name, entity_type)
+                    DO UPDATE SET
+                        document_ids = CASE
+                            WHEN $4::uuid = ANY(entities.document_ids) THEN entities.document_ids
+                            ELSE entities.document_ids || $4::uuid
+                        END,
+                        mention_count = entities.mention_count + 1,
+                        updated_at = now()
+                """, tenant_id, name, etype, doc_id)
+
+    except Exception as e:
+        _get_sanitize_logger().warning(
+            f"[non-critical] Entity extraction failed for doc={doc_id}: {type(e).__name__}: {e}"
+        )

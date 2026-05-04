@@ -1,10 +1,12 @@
 """GET /v1/collections, GET /v1/analytics, DELETE /v1/documents/{doc_id}, GET /v1/datasets"""
+import logging
 from fastapi import APIRouter, Request, HTTPException
 from qdrant_client import AsyncQdrantClient, models
 import os
 
 router = APIRouter()
 qdrant = AsyncQdrantClient(url=os.environ.get("QDRANT_URL", "http://qdrant:6333"))
+logger = logging.getLogger(__name__)
 
 
 @router.get("/collections")
@@ -151,7 +153,7 @@ async def list_datasets(request: Request):
                 "size": obj["Size"],
                 "last_modified": obj["LastModified"].isoformat(),
             })
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"[non-critical] list_datasets failed: {type(e).__name__}: {e}")
 
     return {"datasets": datasets}

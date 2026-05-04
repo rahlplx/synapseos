@@ -4,10 +4,13 @@ Docling never runs with concurrency > 1 on ARM.
 """
 import asyncio
 import json
+import logging
 import os
 import redis.asyncio as redis
 
 from src.core.ingestion import ingest_urls, ingest_file
+
+logger = logging.getLogger(__name__)
 
 keydb = redis.from_url(os.environ.get("KEYDB_URL", "redis://keydb:6379"))
 
@@ -57,8 +60,8 @@ async def process_queue():
             print(f"Job processing error: {e}")
             try:
                 await keydb.hset(f"job:{job_id}", mapping={"status": "failed", "error": str(e)[:500]})
-            except Exception:
-                pass
+            except Exception as e2:
+                logger.error(f"[critical] Failed to write failure status for job {job_id}: {type(e2).__name__}: {e2}")
 
 
 if __name__ == "__main__":

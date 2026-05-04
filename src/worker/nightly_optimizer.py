@@ -4,6 +4,7 @@ L4 — Nightly Intelligence Loop
 """
 import asyncio
 import json
+import logging
 import os
 from datetime import datetime
 from io import BytesIO
@@ -22,6 +23,8 @@ context_precision = ContextPrecision()
 from datasets import Dataset
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
+logger = logging.getLogger(__name__)
+
 minio = boto3.client(
     "s3",
     endpoint_url=f"http://{os.environ.get('MINIO_ENDPOINT', 'minio:9000')}",
@@ -35,8 +38,8 @@ try:
 except Exception:
     try:
         minio.create_bucket(Bucket="synapseos")
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"[non-critical] MinIO bucket creation failed: {type(e).__name__}: {e}")
 
 
 async def score_unscored_logs():

@@ -74,3 +74,21 @@ CREATE TABLE IF NOT EXISTS tools (
     created_at TIMESTAMPTZ DEFAULT now(),
     UNIQUE(tenant_id, name)
 );
+
+-- Entity graph for cross-document relationship queries (LazyGraphRAG pattern)
+-- Enables "what patterns appear across all Q3 campaigns?" type queries
+-- without requiring a full graph database — uses SQL aggregation on existing PG
+CREATE TABLE IF NOT EXISTS entities (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id VARCHAR(64) NOT NULL,
+    entity_name VARCHAR(256) NOT NULL,
+    entity_type VARCHAR(64),        -- person, campaign, client, metric, product, topic
+    document_ids UUID[],            -- which docs mention this entity
+    mention_count INTEGER DEFAULT 1,
+    metadata JSONB DEFAULT '{}',
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_entities_tenant ON entities(tenant_id, entity_type);
+CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(tenant_id, entity_name);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_unique ON entities(tenant_id, entity_name, entity_type);

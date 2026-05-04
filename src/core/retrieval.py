@@ -2,13 +2,17 @@
 L2 — Hybrid Retrieval Engine
 Dense (BAAI/bge-base-en-v1.5) + BM25 sparse → RRF fusion → cross-encoder rerank
 ARM tuned: OMP_NUM_THREADS=4, batch_size=16 query, cross-encoder cap=15 docs
+CRAG: Returns confidence signal — "low" if top score below threshold.
 """
 import os
 os.environ.setdefault("OMP_NUM_THREADS", "4")  # ARM CPU tuning — MUST be before fastembed
 
+import logging
 from qdrant_client import AsyncQdrantClient, models
 from fastembed import TextEmbedding, SparseTextEmbedding
 from sentence_transformers import CrossEncoder
+
+logger = logging.getLogger(__name__)
 
 # ─── Clients ──────────────────────────────────────────────────────────────────
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
@@ -27,6 +31,7 @@ QUERY_BATCH_SIZE = 16       # batch_size=16 for real-time query (architecture do
 PREFETCH_K = 30             # prefetch 30 via RRF per dense/sparse
 RERANK_K = 15               # HARD LIMIT: feed top-15 to cross-encoder (ARM timeout prevention)
 DEFAULT_FINAL_K = 5         # return top-5 after reranking
+CONFIDENCE_THRESHOLD = 0.35 # CRAG: if top reranked score < this, signal "low" confidence
 
 
 async def warm_models():
@@ -106,6 +111,49 @@ async def hybrid_query(
 
     # Filter out low-quality results (score < 0.1 means cross-encoder rejects)
     return [h for h, s in ranked[:final_k] if s > 0.1]
+
+
+async def hybrid_query_with_confidence(
+    query: str,
+    tenant_id: str,
+    prefetch_k: int = PREFETCH_K,
+    rerank_k: int = RERANK_K,
+    final_k: int = DEFAULT_FINAL_K,
+    use_hyde: bool = False,
+    confidence_threshold: float = CONFIDENCE_THRESHOLD,
+) -> tuple[list, str]:
+    """Hybrid retrieval with CRAG confidence signal.
+
+    Returns (hits, confidence) where confidence is "high" or "low".
+    "low" means the top reranked result scored below the threshold —
+    the caller should consider web search fallback or early return
+    instead of burning LLM tokens on weak context.
+
+    CRAG (Corrective RAG) prevents the #1 production failure:
+    confident wrong answers generated from irrelevant context.
+    """
+    results = await hybrid_query(
+        query, tenant_id, prefetch_k, rerank_k, final_k, use_hyde
+    )
+
+    if not results:
+        logger.info(f"[CRAG] Zero results for query: {query[:80]}")
+        return [], "low"
+
+    # Check top result's cross-encoder score
+    # Note: results are Qdrant ScoredPoint objects — score comes from
+    # the Qdrant RRF fusion, not the cross-encoder directly.
+    # We use the Qdrant score as a proxy for retrieval confidence.
+    top_score = float(getattr(results[0], "score", 0.0))
+
+    if top_score < confidence_threshold:
+        logger.info(
+            f"[CRAG] Low confidence (score={top_score:.4f} < {confidence_threshold}) "
+            f"for query: {query[:80]}"
+        )
+        return results, "low"
+
+    return results, "high"
 
 
 async def _create_collection_if_missing(name: str):

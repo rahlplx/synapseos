@@ -4,7 +4,10 @@ mem0 uses Qdrant (synapse_memory collection) + PostgreSQL.
 LLM judge = Groq Llama-8b (fast, free tier) — NOT z.ai API.
 """
 import os
+import logging
 import redis.asyncio as redis
+
+logger = logging.getLogger(__name__)
 
 keydb = redis.from_url(os.environ.get("KEYDB_URL", "redis://keydb:6379"))
 
@@ -65,7 +68,8 @@ async def load_memories(user_id: str, tenant_id: str, query: str) -> str:
             return ""
         facts = [r["memory"] for r in results["results"]]
         return "Relevant memory:\n" + "\n".join(f"- {f}" for f in facts)
-    except Exception:
+    except Exception as e:
+        logger.warning(f"[non-critical] load_memories failed: {type(e).__name__}: {e}")
         return ""
 
 
@@ -81,8 +85,8 @@ async def write_memory(user_id: str, tenant_id: str, messages: list[dict]):
             user_id=f"{tenant_id}:{user_id}",
             metadata={"tenant_id": tenant_id},
         )
-    except Exception:
-        pass  # Memory write failure should never crash the API
+    except Exception as e:
+        logger.warning(f"[non-critical] write_memory failed for user={user_id}: {type(e).__name__}: {e}")
 
 
 async def load_session(session_id: str, window: int = 10) -> list[dict]:
@@ -99,7 +103,8 @@ async def load_session(session_id: str, window: int = 10) -> list[dict]:
                 "content": raw[i + 1].decode(),
             })
         return turns
-    except Exception:
+    except Exception as e:
+        logger.warning(f"[non-critical] load_session failed: {type(e).__name__}: {e}")
         return []
 
 
@@ -110,5 +115,5 @@ async def append_session(session_id: str, role: str, content: str):
     try:
         await keydb.rpush(f"session:{session_id}", role, content)
         await keydb.expire(f"session:{session_id}", 86400)  # 24h TTL
-    except Exception:
-        pass  # Session write failure should never crash the API
+    except Exception as e:
+        logger.warning(f"[non-critical] append_session failed: {type(e).__name__}: {e}")
