@@ -12,7 +12,8 @@ logger = logging.getLogger(__name__)
 @router.get("/collections")
 async def get_collections(request: Request):
     """List document collection stats for the tenant.
-    Returns stats for both synapse_knowledge (RAG) and synapse_memory (mem0).
+    Returns TENANT-SCOPED vector counts (not global counts).
+    Uses Qdrant count with tenant_id filter to prevent cross-tenant data leakage.
     """
     tenant_id = request.state.tenant_id
     result = {"tenant_id": tenant_id, "collections": {}}
@@ -20,8 +21,19 @@ async def get_collections(request: Request):
     for name in ("synapse_knowledge", "synapse_memory"):
         try:
             info = await qdrant.get_collection(name)
+            # Count only this tenant's vectors — prevents cross-tenant data leakage
+            tenant_count = await qdrant.count(
+                name,
+                count_filter=models.Filter(
+                    must=[models.FieldCondition(
+                        key="tenant_id", match=models.MatchValue(value=tenant_id)
+                    )]
+                ),
+                exact=False,  # Approximate count for speed
+            )
             result["collections"][name] = {
-                "vector_count": info.points_count or 0,
+                "vector_count": tenant_count.count if tenant_count else 0,
+                "total_collection_size": info.points_count or 0,  # Global size for debugging
                 "status": info.status,
             }
         except Exception as e:
@@ -91,17 +103,24 @@ async def delete_document(document_id: str, request: Request):
             document_id, tenant_id,
         )
 
-    # Delete vectors by source_url filter
+    # Delete vectors by source_url filter — MUST include tenant_id to prevent
+    # cross-tenant data deletion when two tenants have documents with the same URL
     source_url = doc["source_url"]
     if source_url:
         await qdrant.delete(
             collection_name="synapse_knowledge",
             points_selector=models.FilterSelector(
                 filter=models.Filter(
-                    must=[models.FieldCondition(
-                        key="source_url",
-                        match=models.MatchValue(value=source_url),
-                    )]
+                    must=[
+                        models.FieldCondition(
+                            key="source_url",
+                            match=models.MatchValue(value=source_url),
+                        ),
+                        models.FieldCondition(
+                            key="tenant_id",
+                            match=models.MatchValue(value=tenant_id),
+                        ),
+                    ]
                 )
             ),
         )
@@ -113,10 +132,16 @@ async def delete_document(document_id: str, request: Request):
             collection_name="synapse_knowledge",
             points_selector=models.FilterSelector(
                 filter=models.Filter(
-                    must=[models.FieldCondition(
-                        key="source_filename",
-                        match=models.MatchValue(value=source_filename),
-                    )]
+                    must=[
+                        models.FieldCondition(
+                            key="source_filename",
+                            match=models.MatchValue(value=source_filename),
+                        ),
+                        models.FieldCondition(
+                            key="tenant_id",
+                            match=models.MatchValue(value=tenant_id),
+                        ),
+                    ]
                 )
             ),
         )

@@ -106,8 +106,11 @@ async def hybrid_query(
         return []
 
     # Phase C: Cross-encoder reranking
+    # Cross-encoder predict() is CPU-bound and blocks the event loop.
+    # Run in thread pool to avoid blocking other async requests.
     pairs = [[query, h.payload.get("text", "")] for h in hits]
-    scores = reranker.predict(pairs)
+    import asyncio
+    scores = await asyncio.to_thread(reranker.predict, pairs)
     ranked = sorted(zip(hits, scores), key=lambda x: x[1], reverse=True)
 
     # Filter out low-quality results using Self-RAG relevance gate.

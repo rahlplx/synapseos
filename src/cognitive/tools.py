@@ -102,7 +102,7 @@ class ToolExecutor:
     async def _retrieve_knowledge(self, tool_input: dict, tenant_id: str) -> str:
         """Search the tenant knowledge base using hybrid retrieval."""
         from src.core.retrieval import hybrid_query
-        top_k = tool_input.get("top_k", 5)
+        top_k = min(tool_input.get("top_k", 5), 20)  # Cap at 20 to prevent resource exhaustion
         hits = await hybrid_query(tool_input["query"], tenant_id, final_k=top_k)
         if not hits:
             return "No relevant documents found in knowledge base."
@@ -111,11 +111,14 @@ class ToolExecutor:
     async def _web_search(self, tool_input: dict) -> str:
         """Search the web using Crawl4AI.
         ARM: page_timeout=15000, output capped at 3000 chars.
+        Query is URL-encoded to prevent CRLF/parameter injection.
         """
+        from urllib.parse import quote_plus
         query = tool_input["query"]
+        encoded_query = quote_plus(query)
         async with AsyncWebCrawler() as crawler:
             result = await crawler.arun(
-                url=f"https://search.brave.com/search?q={query}",
+                url=f"https://search.brave.com/search?q={encoded_query}",
                 config=CrawlerRunConfig(
                     cache_mode=CacheMode.BYPASS,
                     page_timeout=15000,

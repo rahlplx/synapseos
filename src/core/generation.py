@@ -80,11 +80,10 @@ async def generate_stream(
         if delta:
             yield f"data: {json.dumps({'chunk': delta})}\n\n"
 
-    # Final SSE message with sources
-    done_payload = {"done": True}
-    if sources:
-        done_payload["sources"] = sources
-    yield f"data: {json.dumps(done_payload)}\n\n"
+    # NOTE: No final "done" message emitted here — the caller (query.py)
+    # is responsible for sending the final SSE message with metadata
+    # (trace_id, sources, reflection_scores, etc.). If we emit a done
+    # message here, the client receives TWO done events.
 
 
 async def generate_hyde(query: str) -> str:

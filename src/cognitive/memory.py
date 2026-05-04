@@ -19,8 +19,8 @@ mem0_config = {
     "vector_store": {
         "provider": "qdrant",
         "config": {
-            "host": os.environ.get("QDRANT_HOST", "qdrant"),
-            "port": 6333,
+            "host": os.environ.get("QDRANT_URL", "http://qdrant:6333").replace("http://", "").replace("https://", "").split(":")[0],
+            "port": int(os.environ.get("QDRANT_URL", "http://qdrant:6333").replace("http://", "").replace("https://", "").split(":")[1].rstrip("/")),
             "collection_name": "synapse_memory",  # Separate from synapse_knowledge
             "embedding_model_dims": 768,
         },

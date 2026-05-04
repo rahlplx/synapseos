@@ -115,6 +115,7 @@ async def cognitive_query(
     session_id: str,
     user_id: str,
     tenant_id: str,
+    tenant_api_key: str = None,
     stream: bool = False,
 ) -> CognitiveResponse:
     """Full cognitive query pipeline:
@@ -159,14 +160,14 @@ async def cognitive_query(
             except Exception as e:
                 logger.warning(f"[CRAG] Web fallback failed: {type(e).__name__}: {e}")
 
-        answer = await generate(question, [context])
+        answer = await generate(question, [context], tenant_api_key)
 
     elif query_type == "complex":
         # Enriched path: retrieve + session + memory context
         hits, confidence = await hybrid_query_with_retry(question, tenant_id)
         knowledge = "\n\n".join(h.payload.get("text", "") for h in hits)
         full_ctx = f"Session:\n{session_str}\n\nMemory:\n{long_term_memory}\n\nKnowledge:\n{knowledge}"
-        answer = await generate(question, [full_ctx])
+        answer = await generate(question, [full_ctx], tenant_api_key)
         context = knowledge  # Use knowledge for reflection, not full context
         steps = 2
 
@@ -175,7 +176,7 @@ async def cognitive_query(
         # Uses SQL aggregation over entities table (LazyGraphRAG pattern)
         context = await _graph_query(question, tenant_id)
         full_ctx = f"Session:\n{session_str}\n\nMemory:\n{long_term_memory}\n\nEntity Relationships:\n{context}"
-        answer = await generate(question, [full_ctx])
+        answer = await generate(question, [full_ctx], tenant_api_key)
         steps = 2
 
     elif query_type == "tool":
@@ -189,12 +190,12 @@ async def cognitive_query(
                 question=question,
                 context=f"Session:\n{session_str}\n\nMemory:\n{long_term_memory}\n\nKnowledge:\n{context}",
                 available_tools=BUILTIN_SCHEMAS,
-                tenant_api_key=None,  # BYOK key injected by middleware
+                tenant_api_key=tenant_api_key,  # BYOK key from middleware
                 tenant_id=tenant_id,  # Required for tenant-isolated retrieval
             )
         except Exception as e:
             logger.warning(f"[non-critical] generate_with_tools failed, falling back: {type(e).__name__}: {e}")
-            answer = await generate(question, [context])
+            answer = await generate(question, [context], tenant_api_key)
             tools_used = ["retrieve_knowledge"]
         steps = 2
 
@@ -202,7 +203,7 @@ async def cognitive_query(
         # Default fallback — simple path
         hits, confidence = await hybrid_query_with_retry(question, tenant_id)
         context = "\n\n".join(h.payload.get("text", "") for h in hits)
-        answer = await generate(question, [context])
+        answer = await generate(question, [context], tenant_api_key)
 
     # ── STEP 4: Self-Reflect ────────────────────────────────────────────
     final_answer, scores = await reflect_and_refine(

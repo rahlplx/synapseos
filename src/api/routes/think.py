@@ -19,6 +19,7 @@ class ThinkRequest(BaseModel):
 @router.post("/think")
 async def think_endpoint(body: ThinkRequest, request: Request):
     tenant_id = request.state.tenant_id
+    api_key = getattr(request.state, "litellm_api_key", None)
     start = time.perf_counter()
 
     if body.stream:
@@ -28,6 +29,7 @@ async def think_endpoint(body: ThinkRequest, request: Request):
             session_id=body.session_id,
             user_id=body.user_id,
             tenant_id=tenant_id,
+            tenant_api_key=api_key,
             stream=False,
         )
         # Stream the answer in SSE format
@@ -54,6 +56,7 @@ async def think_endpoint(body: ThinkRequest, request: Request):
         session_id=body.session_id,
         user_id=body.user_id,
         tenant_id=tenant_id,
+        tenant_api_key=api_key,
     )
     latency_ms = int((time.perf_counter() - start) * 1000)
 

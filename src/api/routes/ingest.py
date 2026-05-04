@@ -21,8 +21,11 @@ async def ingest_endpoint(body: IngestRequest, request: Request, background_task
     """Queue document ingestion. Returns job ID immediately."""
     tenant_id = request.state.tenant_id
     job_id = str(uuid4())
-    # Record job creation timestamp for elapsed_ms calculation
-    await keydb.hset(f"job:{job_id}", "created_at", str(time.time()))
+    # Record job creation timestamp and tenant_id for ownership verification
+    await keydb.hset(f"job:{job_id}", mapping={
+        "created_at": str(time.time()),
+        "tenant_id": tenant_id,
+    })
     background_tasks.add_task(ingest_urls, body.urls, tenant_id, job_id, body.metadata)
     return {"job_id": job_id, "status": "queued", "document_count": len(body.urls)}
 
@@ -37,17 +40,28 @@ async def ingest_file_endpoint(
     tenant_id = request.state.tenant_id
     job_id = str(uuid4())
     content = await file.read()
-    # Record job creation timestamp for elapsed_ms calculation
-    await keydb.hset(f"job:{job_id}", "created_at", str(time.time()))
+    # Record job creation timestamp and tenant_id for ownership verification
+    await keydb.hset(f"job:{job_id}", mapping={
+        "created_at": str(time.time()),
+        "tenant_id": tenant_id,
+    })
     background_tasks.add_task(ingest_file, content, file.filename, tenant_id, job_id)
     return {"job_id": job_id, "status": "queued"}
 
 
 @router.get("/ingest/{job_id}")
 async def ingest_status(job_id: str, request: Request):
-    """Poll ingestion job status. Returns elapsed_ms since job creation."""
+    """Poll ingestion job status. Returns elapsed_ms since job creation.
+    Verifies tenant ownership of the job to prevent cross-tenant access.
+    """
+    tenant_id = request.state.tenant_id
     data = await keydb.hgetall(f"job:{job_id}")
     if not data:
+        return {"job_id": job_id, "status": "not_found"}
+
+    # Verify tenant ownership — prevent cross-tenant job enumeration
+    job_tenant = data.get(b"tenant_id", b"").decode()
+    if job_tenant and job_tenant != tenant_id:
         return {"job_id": job_id, "status": "not_found"}
 
     # Compute elapsed time from KeyDB TTL-based creation timestamp

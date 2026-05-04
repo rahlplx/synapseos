@@ -61,8 +61,7 @@ def _get_minio():
     return _minio_client
 
 
-# ─── PostgreSQL pool (lazy) ──────────────────────────────────────────────────
-_pg_pool = None
+# ─── PostgreSQL pool (delegated to shared pool) ───────────────────────────────
 
 
 async def _get_pg():
