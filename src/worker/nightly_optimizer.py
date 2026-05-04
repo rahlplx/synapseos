@@ -109,16 +109,22 @@ async def export_datasets(version: str = None):
         """)
 
         # DPO: pair best vs worst answer for same query
+        # Use a subquery because HAVING is invalid with DISTINCT ON in PostgreSQL.
         dpo_rows = await conn.fetch("""
-            SELECT DISTINCT ON (query)
-                query,
-                first_value(answer) OVER w AS chosen,
-                last_value(answer) OVER w AS rejected
-            FROM interaction_logs
-            WHERE ragas_combined IS NOT NULL
-            WINDOW w AS (PARTITION BY query ORDER BY ragas_combined
-                         ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
-            HAVING max(ragas_combined) >= 0.7 AND min(ragas_combined) <= 0.4
+            SELECT sub.query, sub.chosen, sub.rejected
+            FROM (
+                SELECT DISTINCT ON (query)
+                    query,
+                    first_value(answer) OVER w AS chosen,
+                    last_value(answer) OVER w AS rejected,
+                    max(ragas_combined) OVER w AS max_score,
+                    min(ragas_combined) OVER w AS min_score
+                FROM interaction_logs
+                WHERE ragas_combined IS NOT NULL
+                WINDOW w AS (PARTITION BY query ORDER BY ragas_combined
+                             ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
+            ) sub
+            WHERE sub.max_score >= 0.7 AND sub.min_score <= 0.4
         """)
 
         # Mark as exported

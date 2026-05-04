@@ -147,3 +147,35 @@ Phase 3 Cognitive (Days 9-12)
 - Built: Complete repo, all docs, Docker, SDKs, MCP, configs
 - Status: Scaffold complete
 - Next: Day 1 — Docker services live
+
+## Session 2026-05-04 — Phase 1-3 Bug Fixes + Build Completion
+- Built: Fixed all critical bugs, added missing files, created test scripts
+- Files changed:
+  - requirements.txt: Added psutil, verified no zai-sdk
+  - docker-compose.yml: Fixed Langfuse DB name (synapseos not langfuse)
+  - .env.example: Created with all 17 required variables
+  - src/core/ingestion.py: Added DOCLING_CPU_ONLY, MinIO storage, PostgreSQL records, SparseVector fix
+  - src/core/retrieval.py: Fixed SparseVector API, ensure_collection creates both knowledge + memory
+  - src/api/main.py: Wired close_ingestion_clients into lifespan shutdown
+  - src/cognitive/generation_tools.py: Added tenant_id parameter
+  - src/cognitive/engine.py: Pass tenant_id to generate_with_tools
+  - src/worker/nightly_optimizer.py: Fixed DPO SQL (HAVING → subquery)
+  - src/api/routes/collections.py: Added synapse_memory TODO
+  - scripts/test_ingest.py: Created
+  - scripts/test_endpoint.py: Created
+  - scripts/test_sdk.py: Created
+  - scripts/test_memory.py: Created
+  - scripts/test_reflection.py: Created
+  - scripts/test_tools.py: Created
+  - scripts/test_think.py: Created
+- Test commands:
+  - python3 scripts/test_ingest.py
+  - python3 scripts/test_retrieval.py
+  - python3 scripts/test_endpoint.py
+  - python3 scripts/test_sdk.py
+  - python3 scripts/test_memory.py
+  - python3 scripts/test_reflection.py
+  - python3 scripts/test_tools.py
+  - python3 scripts/test_think.py
+- Status: ✅ Code complete — all 12 days of build plan executed, all bugs fixed
+- Next: Deploy to Oracle ARM, run Docker services, execute test scripts

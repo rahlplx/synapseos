@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "synapseos": {
+      "command": "python3",
+      "args": ["/absolute/path/to/synapseos/mcp/synapse_mcp.py"],
+      "env": {
+        "SYNAPSE_BASE_URL": "http://localhost:8000",
+        "SYNAPSE_API_KEY": "sk-syn-your-key-here",
+        "SYNAPSE_TENANT_ID": "default"
+      }
+    }
+  }
+}

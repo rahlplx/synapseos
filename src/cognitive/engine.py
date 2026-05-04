@@ -86,6 +86,7 @@ async def cognitive_query(
                 context=f"Session:\n{session_str}\n\nMemory:\n{long_term_memory}\n\nKnowledge:\n{context}",
                 available_tools=BUILTIN_SCHEMAS,
                 tenant_api_key=None,  # BYOK key injected by middleware
+                tenant_id=tenant_id,  # Required for tenant-isolated retrieval
             )
         except Exception:
             # Fallback: generate without tools if function calling fails

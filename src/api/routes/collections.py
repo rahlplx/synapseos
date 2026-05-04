@@ -9,17 +9,26 @@ qdrant = AsyncQdrantClient(url=os.environ.get("QDRANT_URL", "http://qdrant:6333"
 
 @router.get("/collections")
 async def get_collections(request: Request):
-    """List document collection stats for the tenant."""
+    """List document collection stats for the tenant.
+    Returns stats for both synapse_knowledge (RAG) and synapse_memory (mem0).
+    """
     tenant_id = request.state.tenant_id
-    try:
-        info = await qdrant.get_collection("synapse_knowledge")
-        return {
-            "tenant_id": tenant_id,
-            "vector_count": info.points_count or 0,
-            "status": info.status,
-        }
-    except Exception:
-        return {"tenant_id": tenant_id, "vector_count": 0, "status": "not_found"}
+    result = {"tenant_id": tenant_id, "collections": {}}
+
+    for name in ("synapse_knowledge", "synapse_memory"):
+        try:
+            info = await qdrant.get_collection(name)
+            result["collections"][name] = {
+                "vector_count": info.points_count or 0,
+                "status": info.status,
+            }
+        except Exception:
+            result["collections"][name] = {
+                "vector_count": 0,
+                "status": "not_found",
+            }
+
+    return result
 
 
 @router.get("/analytics")
@@ -66,7 +75,7 @@ async def get_analytics(request: Request):
 
 @router.delete("/documents/{document_id}")
 async def delete_document(document_id: str, request: Request):
-    """Remove a document and all its vectors from Qdrant."""
+    """Remove a document from PostgreSQL and all its vectors from Qdrant."""
     tenant_id = request.state.tenant_id
     import asyncpg
 
@@ -79,21 +88,44 @@ async def delete_document(document_id: str, request: Request):
         )
         if not doc:
             raise HTTPException(404, "Document not found")
+
+        # Delete document row from PostgreSQL
+        await conn.execute(
+            "DELETE FROM documents WHERE id=$1::uuid AND tenant_id=$2",
+            document_id, tenant_id,
+        )
     finally:
         await conn.close()
 
-    # Delete vectors by filter
-    await qdrant.delete(
-        collection_name="synapse_knowledge",
-        points_selector=models.FilterSelector(
-            filter=models.Filter(
-                must=[models.FieldCondition(
-                    key="source_url",
-                    match=models.MatchValue(value=doc["source_url"]),
-                )]
-            )
-        ),
-    )
+    # Delete vectors by source_url filter
+    source_url = doc["source_url"]
+    if source_url:
+        await qdrant.delete(
+            collection_name="synapse_knowledge",
+            points_selector=models.FilterSelector(
+                filter=models.Filter(
+                    must=[models.FieldCondition(
+                        key="source_url",
+                        match=models.MatchValue(value=source_url),
+                    )]
+                )
+            ),
+        )
+
+    # Also delete by source_filename if no URL (file uploads)
+    source_filename = doc["source_filename"]
+    if source_filename and not source_url:
+        await qdrant.delete(
+            collection_name="synapse_knowledge",
+            points_selector=models.FilterSelector(
+                filter=models.Filter(
+                    must=[models.FieldCondition(
+                        key="source_filename",
+                        match=models.MatchValue(value=source_filename),
+                    )]
+                )
+            ),
+        )
 
     return {"deleted": True, "document_id": document_id}
 

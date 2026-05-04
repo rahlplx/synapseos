@@ -29,6 +29,7 @@ async def generate_with_tools(
     context: str,
     available_tools: list[dict],
     tenant_api_key: str = None,
+    tenant_id: str = "",
 ) -> tuple[str, list[str]]:
     """Generate answer with LiteLLM function calling support.
 
@@ -62,15 +63,13 @@ async def generate_with_tools(
     if tool_calls:
         # Execute all tool calls in PARALLEL
         executor = ToolExecutor()
-        # We need tenant_id — extract from context or use empty string
-        # In practice, tenant_id is passed through the cognitive engine
         tasks = []
         for tc in tool_calls:
             try:
                 tool_input = json.loads(tc.function.arguments)
             except json.JSONDecodeError:
                 tool_input = {}
-            tasks.append(executor.execute(tc.function.name, tool_input, ""))
+            tasks.append(executor.execute(tc.function.name, tool_input, tenant_id))
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
 

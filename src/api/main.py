@@ -21,14 +21,16 @@ async def lifespan(app: FastAPI):
     # 1. Warm ONNX models (avoid cold-start latency on first query)
     from src.core.retrieval import warm_models, ensure_collection
     await warm_models()
-    # 2. Ensure Qdrant collection exists
+    # 2. Ensure Qdrant collections exist (synapse_knowledge + synapse_memory)
     await ensure_collection()
-    print("✅ SynapseOS ready — models warmed, collection ensured")
+    print("✅ SynapseOS ready — models warmed, collections ensured")
     yield
     # ── Shutdown ──
+    from src.core.ingestion import close_ingestion_clients
+    await close_ingestion_clients()
     from langfuse import Langfuse
     Langfuse().flush()
-    print("✅ SynapseOS shutdown — Langfuse flushed")
+    print("✅ SynapseOS shutdown — clients closed, Langfuse flushed")
 
 
 app = FastAPI(

@@ -12,7 +12,8 @@ from sentence_transformers import CrossEncoder
 
 # ─── Clients ──────────────────────────────────────────────────────────────────
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
-COLLECTION = "synapse_knowledge"
+COLLECTION_KNOWLEDGE = "synapse_knowledge"
+COLLECTION_MEMORY = "synapse_memory"
 
 qdrant = AsyncQdrantClient(url=QDRANT_URL)
 
@@ -69,8 +70,10 @@ async def hybrid_query(
     )
 
     # Phase B: Qdrant prefetch + RRF fusion
+    # Sparse vector uses models.SparseVector(indices=..., values=...) for
+    # compatibility with newer qdrant-client API versions (not raw dict).
     hits = (await qdrant.query_points(
-        collection_name=COLLECTION,
+        collection_name=COLLECTION_KNOWLEDGE,
         prefetch=[
             models.Prefetch(
                 query=dense_vec.tolist(),
@@ -79,7 +82,10 @@ async def hybrid_query(
                 filter=tenant_filter,   # tenant filter on DENSE prefetch
             ),
             models.Prefetch(
-                query=sparse_vec.as_object(),
+                query=models.SparseVector(
+                    indices=sparse_vec.indices.tolist(),
+                    values=sparse_vec.values.tolist(),
+                ),
                 using="sparse",
                 limit=prefetch_k,
                 filter=tenant_filter,   # tenant filter on SPARSE prefetch
@@ -102,32 +108,46 @@ async def hybrid_query(
     return [h for h, s in ranked[:final_k] if s > 0.1]
 
 
+async def _create_collection_if_missing(name: str):
+    """Create a Qdrant collection with ARM-optimized settings if it doesn't exist.
+    Shared logic for both synapse_knowledge and synapse_memory collections.
+    """
+    if await qdrant.collection_exists(name):
+        return
+
+    await qdrant.create_collection(
+        collection_name=name,
+        vectors_config={
+            "dense": models.VectorParams(
+                size=768,
+                distance=models.Distance.COSINE,
+                on_disk=True,  # ARM mmap — critical
+            )
+        },
+        sparse_vectors_config={
+            "sparse": models.SparseVectorParams(
+                modifier=models.Modifier.IDF
+            )
+        },
+        shard_number=1,
+        optimizers_config=models.OptimizersConfigDiff(
+            memmap_threshold_kb=50_000,
+            indexing_threshold_kb=100_000,
+            max_segment_size_kb=65_536,
+        ),
+    )
+    await qdrant.create_payload_index(
+        name, "tenant_id", models.PayloadSchemaType.KEYWORD
+    )
+
+
 async def ensure_collection():
-    """Create Qdrant collection with ARM-optimized settings if it doesn't exist.
+    """Create Qdrant collections with ARM-optimized settings if they don't exist.
+    Creates BOTH synapse_knowledge (RAG) and synapse_memory (mem0) collections.
     Called on startup by FastAPI lifespan handler.
     """
-    if not await qdrant.collection_exists(COLLECTION):
-        await qdrant.create_collection(
-            collection_name=COLLECTION,
-            vectors_config={
-                "dense": models.VectorParams(
-                    size=768,
-                    distance=models.Distance.COSINE,
-                    on_disk=True,  # ARM mmap — critical
-                )
-            },
-            sparse_vectors_config={
-                "sparse": models.SparseVectorParams(
-                    modifier=models.Modifier.IDF
-                )
-            },
-            shard_number=1,
-            optimizers_config=models.OptimizersConfigDiff(
-                memmap_threshold_kb=50_000,
-                indexing_threshold_kb=100_000,
-                max_segment_size_kb=65_536,
-            ),
-        )
-        await qdrant.create_payload_index(
-            COLLECTION, "tenant_id", models.PayloadSchemaType.KEYWORD
-        )
+    # synapse_knowledge — primary RAG knowledge base
+    await _create_collection_if_missing(COLLECTION_KNOWLEDGE)
+
+    # synapse_memory — mem0 long-term memory (same vector schema for consistency)
+    await _create_collection_if_missing(COLLECTION_MEMORY)
