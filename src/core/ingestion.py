@@ -250,16 +250,23 @@ def parse_document(file_bytes: bytes, filename: str) -> str:
 
 
 def semantic_chunk(text: str, max_tokens: int = 512, overlap: int = 64) -> list[str]:
-    """Split text into semantic chunks using the embedding tokenizer.
+    """Split text into semantic chunks using the semchunk library.
     chunk_size=512 tokens, overlap=64 tokens (architecture doc).
+    Uses tiktoken for accurate token counting (cl100k_base = GPT-4 tokenizer).
     """
-    from semchunk import SemanticChunker
-    chunker = SemanticChunker(
-        tokenizer="BAAI/bge-base-en-v1.5",
+    from semchunk import chunk
+    import tiktoken
+
+    enc = tiktoken.get_encoding("cl100k_base")
+
+    def token_counter(t: str) -> int:
+        return len(enc.encode(t))
+
+    chunks = chunk(
+        text,
         chunk_size=max_tokens,
-        overlap=overlap,
+        token_counter=token_counter,
     )
-    chunks = chunker.chunk_text(text)
     if not chunks:
         raise ValueError("Semantic chunking produced zero chunks — input may be too short")
     return chunks

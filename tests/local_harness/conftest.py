@@ -1,25 +1,27 @@
-"""Shared test fixtures for SynapseOS.
-
-Includes local harness setup for in-memory testing without Docker,
-PostgreSQL, Redis/KeyDB, MinIO, or external LLM APIs.
+"""
+SynapseOS Local Test Harness — pytest conftest
+Sets up all patches before tests, provides fixtures for in-memory services.
 """
 import os
 import asyncio
 import pytest
 
-# ── Environment setup (must happen before any src module imports) ──────────────
 from tests.local_harness.patches import (
     setup_env,
     get_qdrant_client,
     get_keydb_client,
     get_pg_pool,
     create_qdrant_collections,
+    close_qdrant_client,
+    close_pg_pool,
     apply_patches,
 )
 
+
+# ── Environment setup (before any module imports) ──────────────────────────────
 setup_env()
 
-# ── One-time async initialization ─────────────────────────────────────────────
+# ── One-time async initialization (runs at conftest import time) ───────────────
 _initialized = False
 
 
@@ -38,23 +40,14 @@ def _ensure_initialized():
 _ensure_initialized()
 
 
-# ── Fixtures ───────────────────────────────────────────────────────────────────
-
-@pytest.fixture
-def tenant_id():
-    """Default tenant ID for tests."""
-    return "test-tenant-001"
-
-
-@pytest.fixture
-def base_url():
-    """Base URL for API tests."""
-    return "http://localhost:8000"
-
-
 @pytest.fixture
 def qdrant_client():
-    """Provide the in-memory Qdrant client for tests."""
+    """Provide the in-memory Qdrant client for tests (sync fixture)."""
+    return _get_qdrant_client_sync()
+
+
+def _get_qdrant_client_sync():
+    """Get the Qdrant client synchronously."""
     loop = asyncio.new_event_loop()
     try:
         return loop.run_until_complete(get_qdrant_client())
@@ -70,12 +63,18 @@ def keydb_client():
 
 @pytest.fixture
 def pg_pool():
-    """Provide the FakePGPool for tests (lazy init on first use)."""
+    """Provide the FakePGPool for tests (sync fixture, lazy init on first use)."""
     loop = asyncio.new_event_loop()
     try:
         return loop.run_until_complete(get_pg_pool())
     finally:
         loop.close()
+
+
+@pytest.fixture
+def tenant_id():
+    """Default tenant ID for tests."""
+    return "test-tenant-001"
 
 
 @pytest.fixture
