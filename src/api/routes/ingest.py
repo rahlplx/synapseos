@@ -2,7 +2,7 @@
 import time
 from uuid import uuid4
 from fastapi import APIRouter, Request, BackgroundTasks, UploadFile, File
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from src.core.ingestion import ingest_urls, ingest_file
 import redis.asyncio as redis
 import os
@@ -12,7 +12,7 @@ keydb = redis.from_url(os.environ.get("KEYDB_URL", "redis://keydb:6379"))
 
 
 class IngestRequest(BaseModel):
-    urls: list[str]
+    urls: list[str] = Field(..., max_length=10, description="List of URLs to ingest (max 10)")
     metadata: dict = {}
 
 

@@ -4,7 +4,10 @@ Uses Groq Llama-3.1-8b-instant (fast, ~200ms) to judge answer quality.
 Adds ~200ms. Max 1 retry cycle.
 """
 import json
+import logging
 from src.core.generation import fast_complete
+
+logger = logging.getLogger(__name__)
 
 REFLECTION_PROMPT = """You are a strict answer quality judge. Evaluate this RAG answer.
 
@@ -54,8 +57,9 @@ async def reflect_and_refine(
                 json_mode=True,
             )
             scores = json.loads(raw)
-        except (json.JSONDecodeError, Exception):
-            # Malformed JSON or other error — return original answer as-is
+        except (json.JSONDecodeError, Exception) as e:
+            # Malformed JSON or other error — log and return original answer as-is
+            logger.warning(f"[non-critical] Reflection score parse failed: {type(e).__name__}: {e}")
             return answer, {}
 
         # Combined score: 0.4*faithfulness + 0.3*relevancy + 0.3*completeness
@@ -79,7 +83,8 @@ async def reflect_and_refine(
                 ),
                 max_tokens=600,
             )
-        except Exception:
+        except Exception as e:
+            logger.warning(f"[non-critical] Reflection retry failed: {type(e).__name__}: {e}")
             return answer, scores
 
     return answer, {}

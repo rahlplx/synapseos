@@ -145,19 +145,16 @@ class ToolExecutor:
         Auth header is Fernet-decrypted from PostgreSQL. 15s timeout.
         Output capped at 3000 chars.
         """
-        import asyncpg
+        from src.core.db import get_pool
         tool_name = tool_input.get("tool_name", "")
         payload = tool_input.get("payload", {})
 
-        db_url = os.environ.get("DATABASE_URL", "").replace("+asyncpg", "")
-        conn = await asyncpg.connect(db_url)
-        try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
             tool = await conn.fetchrow(
                 "SELECT * FROM tools WHERE tenant_id=$1 AND name=$2 AND active=TRUE",
                 tenant_id, tool_name,
             )
-        finally:
-            await conn.close()
 
         if not tool:
             return f"Error: tool '{tool_name}' not found for tenant {tenant_id}"

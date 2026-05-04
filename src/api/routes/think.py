@@ -2,7 +2,7 @@
 import time
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from src.cognitive.engine import cognitive_query
 from src.core.generation import generate_stream
 
@@ -10,7 +10,7 @@ router = APIRouter()
 
 
 class ThinkRequest(BaseModel):
-    question: str
+    question: str = Field(..., max_length=2000, description="Query question (max 2000 chars)")
     session_id: str
     user_id: str
     stream: bool = False

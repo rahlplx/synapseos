@@ -19,7 +19,7 @@ async def process_queue():
     """Process ingestion jobs from the KeyDB queue.
     Uses BRPOP for efficient blocking wait. Sequential processing (concurrency=1).
     """
-    print("Ingestion worker started — waiting for jobs (concurrency=1)...")
+    logger.info("Ingestion worker started — waiting for jobs (concurrency=1)...")
 
     while True:
         try:
@@ -35,7 +35,7 @@ async def process_queue():
             tenant_id = data["tenant_id"]
             job_type = data.get("type", "urls")
 
-            print(f"Processing job: {job_id} (type={job_type})")
+            logger.info(f"Processing job: {job_id} (type={job_type})")
 
             if job_type == "urls":
                 await ingest_urls(
@@ -52,12 +52,12 @@ async def process_queue():
                     job_id=job_id,
                 )
 
-            print(f"Job {job_id} complete")
+            logger.info(f"Job {job_id} complete")
 
         except json.JSONDecodeError as e:
-            print(f"Invalid job data: {e}")
+            logger.warning(f"Invalid job data: {type(e).__name__}: {e}")
         except Exception as e:
-            print(f"Job processing error: {e}")
+            logger.error(f"Job processing error: {type(e).__name__}: {e}")
             try:
                 await keydb.hset(f"job:{job_id}", mapping={"status": "failed", "error": str(e)[:500]})
             except Exception as e2:

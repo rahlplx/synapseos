@@ -32,6 +32,7 @@ PREFETCH_K = 30             # prefetch 30 via RRF per dense/sparse
 RERANK_K = 15               # HARD LIMIT: feed top-15 to cross-encoder (ARM timeout prevention)
 DEFAULT_FINAL_K = 5         # return top-5 after reranking
 CONFIDENCE_THRESHOLD = 0.35 # CRAG: if top reranked score < this, signal "low" confidence
+RELEVANCE_GATE = 0.20       # Self-RAG: minimum cross-encoder score for a document to be included in context
 
 
 async def warm_models():
@@ -109,8 +110,19 @@ async def hybrid_query(
     scores = reranker.predict(pairs)
     ranked = sorted(zip(hits, scores), key=lambda x: x[1], reverse=True)
 
-    # Filter out low-quality results (score < 0.1 means cross-encoder rejects)
-    return [h for h, s in ranked[:final_k] if s > 0.1]
+    # Filter out low-quality results using Self-RAG relevance gate.
+    # Documents below the relevance gate threshold are excluded from LLM context
+    # to prevent hallucination from irrelevant retrieved documents (Self-RAG pattern).
+    # Attach cross-encoder scores to hits for downstream CRAG confidence gating.
+    scored_hits = []
+    for h, s in ranked[:final_k]:
+        if s >= RELEVANCE_GATE:
+            # Store cross-encoder score in payload for confidence gate access
+            h.payload["_rerank_score"] = float(s)
+            scored_hits.append(h)
+        else:
+            logger.debug(f"[Self-RAG] Document filtered by relevance gate (score={s:.4f} < {RELEVANCE_GATE})")
+    return scored_hits
 
 
 async def hybrid_query_with_confidence(
@@ -140,20 +152,70 @@ async def hybrid_query_with_confidence(
         logger.info(f"[CRAG] Zero results for query: {query[:80]}")
         return [], "low"
 
-    # Check top result's cross-encoder score
-    # Note: results are Qdrant ScoredPoint objects — score comes from
-    # the Qdrant RRF fusion, not the cross-encoder directly.
-    # We use the Qdrant score as a proxy for retrieval confidence.
-    top_score = float(getattr(results[0], "score", 0.0))
+    # Use cross-encoder rerank score for confidence — NOT Qdrant RRF score.
+    # The cross-encoder score is a much more reliable signal of relevance
+    # because it directly measures query-document similarity, whereas RRF
+    # is a rank-based fusion heuristic.
+    top_rerank_score = results[0].payload.get("_rerank_score", 0.0)
 
-    if top_score < confidence_threshold:
+    if top_rerank_score < confidence_threshold:
         logger.info(
-            f"[CRAG] Low confidence (score={top_score:.4f} < {confidence_threshold}) "
+            f"[CRAG] Low confidence (rerank_score={top_rerank_score:.4f} < {confidence_threshold}) "
             f"for query: {query[:80]}"
         )
         return results, "low"
 
     return results, "high"
+
+
+async def hybrid_query_with_retry(
+    query: str,
+    tenant_id: str,
+    prefetch_k: int = PREFETCH_K,
+    rerank_k: int = RERANK_K,
+    final_k: int = DEFAULT_FINAL_K,
+    use_hyde: bool = False,
+    confidence_threshold: float = CONFIDENCE_THRESHOLD,
+) -> tuple[list, str]:
+    """CRAG: Hybrid retrieval with query rewrite on low confidence.
+
+    If the initial retrieval returns low confidence, the query is rewritten
+    using the fast Groq 8b model to be more specific/search-friendly, and
+    retrieval is retried once. This implements the CRAG query-rewrite pattern.
+
+    Falls back to the original results if rewrite doesn't improve confidence.
+
+    Returns (hits, confidence) where confidence is "high" or "low".
+    """
+    results, confidence = await hybrid_query_with_confidence(
+        query, tenant_id, prefetch_k, rerank_k, final_k, use_hyde, confidence_threshold
+    )
+
+    if confidence == "high":
+        return results, "high"
+
+    # Low confidence — try query rewrite
+    try:
+        from src.core.generation import fast_complete
+        rewritten = await fast_complete(
+            f"Rewrite this question to be more specific and search-friendly. "
+            f"Keep it concise. Original: {query}\nRewritten:",
+            max_tokens=100,
+        )
+        rewritten = rewritten.strip()
+        if rewritten and rewritten.lower() != query.lower():
+            logger.info(f"[CRAG] Retrying with rewritten query: {rewritten[:80]}")
+            retry_results, retry_conf = await hybrid_query_with_confidence(
+                rewritten, tenant_id, prefetch_k, rerank_k, final_k, use_hyde, confidence_threshold
+            )
+            if retry_conf == "high" or (retry_results and len(retry_results) > len(results)):
+                logger.info("[CRAG] Query rewrite improved retrieval")
+                return retry_results, retry_conf
+    except Exception as e:
+        logger.warning(f"[CRAG] Query rewrite failed: {type(e).__name__}: {e}")
+
+    # Return original results if rewrite didn't help
+    return results, "low"
 
 
 async def _create_collection_if_missing(name: str):

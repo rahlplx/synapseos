@@ -2,8 +2,10 @@
 L7 — Memory (mem0 + KeyDB session)
 mem0 uses Qdrant (synapse_memory collection) + PostgreSQL.
 LLM judge = Groq Llama-8b (fast, free tier) — NOT z.ai API.
+All mem0 calls wrapped with asyncio.wait_for() to prevent indefinite blocking.
 """
 import os
+import asyncio
 import logging
 import redis.asyncio as redis
 
@@ -41,6 +43,7 @@ mem0_config = {
 
 # Lazy init — only create Memory instance when first needed
 _memory = None
+MEM0_TIMEOUT = 5  # seconds — timeout for mem0 operations to prevent indefinite blocking
 
 
 def _get_memory():
@@ -56,18 +59,26 @@ async def load_memories(user_id: str, tenant_id: str, query: str) -> str:
     """Recall relevant long-term memories for this query.
     Returns empty string (not None) when no memories found.
     Never raises — errors are caught and logged silently.
+    Wrapped with asyncio.wait_for() to prevent indefinite blocking from mem0.
     """
     try:
         memory = _get_memory()
-        results = memory.search(
-            query=query,
-            user_id=f"{tenant_id}:{user_id}",
-            limit=5,
+        results = await asyncio.wait_for(
+            asyncio.to_thread(
+                memory.search,
+                query=query,
+                user_id=f"{tenant_id}:{user_id}",
+                limit=5,
+            ),
+            timeout=MEM0_TIMEOUT,
         )
         if not results.get("results"):
             return ""
         facts = [r["memory"] for r in results["results"]]
         return "Relevant memory:\n" + "\n".join(f"- {f}" for f in facts)
+    except asyncio.TimeoutError:
+        logger.warning(f"[non-critical] load_memories timed out after {MEM0_TIMEOUT}s for user={user_id}")
+        return ""
     except Exception as e:
         logger.warning(f"[non-critical] load_memories failed: {type(e).__name__}: {e}")
         return ""
@@ -77,14 +88,21 @@ async def write_memory(user_id: str, tenant_id: str, messages: list[dict]):
     """Extract and store important facts from this conversation turn.
     Must NEVER block or crash the response — always wrapped in try/except.
     Called via asyncio.create_task() for non-blocking execution.
+    Wrapped with asyncio.wait_for() to prevent indefinite blocking from mem0.
     """
     try:
         memory = _get_memory()
-        memory.add(
-            messages=messages,
-            user_id=f"{tenant_id}:{user_id}",
-            metadata={"tenant_id": tenant_id},
+        await asyncio.wait_for(
+            asyncio.to_thread(
+                memory.add,
+                messages=messages,
+                user_id=f"{tenant_id}:{user_id}",
+                metadata={"tenant_id": tenant_id},
+            ),
+            timeout=MEM0_TIMEOUT,
         )
+    except asyncio.TimeoutError:
+        logger.warning(f"[non-critical] write_memory timed out after {MEM0_TIMEOUT}s for user={user_id}")
     except Exception as e:
         logger.warning(f"[non-critical] write_memory failed for user={user_id}: {type(e).__name__}: {e}")
 

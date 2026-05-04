@@ -4,8 +4,8 @@ import json
 import logging
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
-from src.core.retrieval import hybrid_query_with_confidence
+from pydantic import BaseModel, Field
+from src.core.retrieval import hybrid_query_with_retry
 from src.core.generation import generate_stream, generate
 from src.cognitive.reflection import reflect_and_refine
 
@@ -18,8 +18,8 @@ RETRIEVAL_CONFIDENCE_THRESHOLD = 0.35
 
 
 class QueryRequest(BaseModel):
-    question: str
-    top_k: int = 5
+    question: str = Field(..., max_length=2000, description="Query question (max 2000 chars)")
+    top_k: int = Field(default=5, ge=1, le=20)
     stream: bool = True
     use_hyde: bool = False
     disable_web_fallback: bool = False  # Set True to skip CRAG web search fallback
@@ -32,8 +32,8 @@ async def query_endpoint(body: QueryRequest, request: Request):
     trace_id = getattr(request.state, "langfuse_trace_id", "")
     start = time.perf_counter()
 
-    # 1. Hybrid retrieval with CRAG confidence gate
-    hits, confidence = await hybrid_query_with_confidence(
+    # 1. Hybrid retrieval with CRAG confidence gate + query rewrite on low confidence
+    hits, confidence = await hybrid_query_with_retry(
         body.question, tenant_id,
         final_k=body.top_k,
         use_hyde=body.use_hyde,
@@ -43,7 +43,7 @@ async def query_endpoint(body: QueryRequest, request: Request):
         {
             "chunk_id": str(h.id),
             "text": h.payload.get("text", ""),
-            "score": round(float(getattr(h, "score", 0.0)), 4),
+            "score": round(h.payload.get("_rerank_score", float(getattr(h, "score", 0.0))), 4),
             "source_url": h.payload.get("source_url", ""),
         }
         for h in hits
@@ -84,13 +84,15 @@ async def query_endpoint(body: QueryRequest, request: Request):
 
     context_str = "\n\n---\n\n".join(contexts)
 
-    # 2. Streaming path (collect → reflect → re-stream)
+    # 2. Streaming path — stream tokens immediately, reflect in background
+    # Fixed: previous implementation collected full answer before streaming,
+    # defeating the purpose of SSE streaming. Now we stream tokens as they
+    # arrive and run reflection after the stream completes.
     if body.stream:
-        async def reflect_and_stream():
-            # Collect full answer first
+        async def stream_and_reflect():
             full_answer = ""
             async for chunk_bytes in generate_stream(body.question, contexts, api_key):
-                # chunk_bytes is already "data: {...}\n\n" — extract text
+                # Forward SSE chunks to client immediately
                 try:
                     raw = chunk_bytes.replace("data: ", "").strip()
                     payload = json.loads(raw)
@@ -98,24 +100,22 @@ async def query_endpoint(body: QueryRequest, request: Request):
                         full_answer += payload["chunk"]
                 except Exception as e:
                     logger.debug(f"[SSE] Non-parseable chunk skipped: {type(e).__name__}")
+                # Yield the chunk to the client RIGHT AWAY
+                yield chunk_bytes if chunk_bytes.endswith("\n\n") else chunk_bytes + "\n\n"
 
-            # Reflect on collected answer
+            # After stream completes, run reflection and send metadata
             try:
-                final_answer, scores = await reflect_and_refine(
+                _, scores = await reflect_and_refine(
                     body.question, context_str, full_answer
                 )
             except Exception as e:
                 logger.warning(f"[non-critical] Reflection failed in stream: {type(e).__name__}: {e}")
-                final_answer, scores = full_answer, {}
-
-            # Stream the (potentially improved) answer token by token
-            for char in final_answer:
-                yield f"data: {json.dumps({'chunk': char})}\n\n"
+                scores = {}
 
             latency_ms = int((time.perf_counter() - start) * 1000)
             yield f"data: {json.dumps({'done': True, 'trace_id': trace_id, 'reflection_scores': scores, 'latency_ms': latency_ms, 'sources': sources, 'confidence': confidence})}\n\n"
 
-        return StreamingResponse(reflect_and_stream(), media_type="text/event-stream")
+        return StreamingResponse(stream_and_reflect(), media_type="text/event-stream")
 
     # 3. Non-streaming path
     answer = await generate(body.question, contexts, api_key)

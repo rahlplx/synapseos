@@ -66,12 +66,9 @@ _pg_pool = None
 
 
 async def _get_pg():
-    """Lazy-initialize asyncpg connection pool."""
-    global _pg_pool
-    if _pg_pool is None:
-        dsn = DATABASE_URL.replace("+asyncpg", "")
-        _pg_pool = await asyncpg.create_pool(dsn, min_size=1, max_size=4)
-    return _pg_pool
+    """Get the shared asyncpg connection pool."""
+    from src.core.db import get_pool
+    return await get_pool()
 
 
 # ─── Models (lazy_load=True — only allocate RAM on first embed call) ──────────
@@ -199,10 +196,8 @@ async def log_interaction(
 
 async def close_ingestion_clients():
     """Gracefully close async clients. Called on shutdown."""
-    global _pg_pool
-    if _pg_pool is not None:
-        await _pg_pool.close()
-        _pg_pool = None
+    from src.core.db import close_pool
+    await close_pool()
 
 
 # ─── Core Pipeline ────────────────────────────────────────────────────────────
@@ -560,7 +555,10 @@ async def ingest_file(
         # 8. Update PostgreSQL document record with final chunk count
         await update_document_status(doc_id, "done", chunk_count=len(unique))
 
-        # 9. Log ingestion event to interaction_logs
+        # 9. Extract entities for graph queries (fire-and-forget)
+        asyncio.create_task(_extract_and_store_entities(markdown, tenant_id, doc_id))
+
+        # 10. Log ingestion event to interaction_logs
         await log_interaction(
             tenant_id=tenant_id,
             event_type="file_ingest",

@@ -6,7 +6,10 @@ Groq 70b supports function calling — used for tool path in cognitive engine.
 import os
 import json
 import asyncio
+import logging
 from litellm import acompletion
+
+logger = logging.getLogger(__name__)
 
 # ─── Model Constants ──────────────────────────────────────────────────────────
 GENERATION_MODEL = "groq/llama-3.1-70b-versatile"    # Primary: quality + tool calling
@@ -67,7 +70,8 @@ async def generate_with_tools(
         for tc in tool_calls:
             try:
                 tool_input = json.loads(tc.function.arguments)
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as e:
+                logger.warning(f"[non-critical] Tool call arguments JSON parse failed: {type(e).__name__}: {e}")
                 tool_input = {}
             tasks.append(executor.execute(tc.function.name, tool_input, tenant_id))
 

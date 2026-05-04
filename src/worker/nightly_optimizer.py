@@ -35,7 +35,8 @@ minio = boto3.client(
 # Ensure MinIO bucket exists
 try:
     minio.head_bucket(Bucket="synapseos")
-except Exception:
+except Exception as e:
+    logger.warning(f"[non-critical] MinIO head_bucket failed: {type(e).__name__}: {e}")
     try:
         minio.create_bucket(Bucket="synapseos")
     except Exception as e:
@@ -58,7 +59,7 @@ async def score_unscored_logs():
         """)
 
         if not rows:
-            print("No unscored logs — skipping RAGAS")
+            logger.info("No unscored logs — skipping RAGAS")
             return []
 
         for row in rows:
@@ -92,7 +93,7 @@ async def score_unscored_logs():
                     float(combined),
                 )
             except Exception as e:
-                print(f"RAGAS scoring failed for log {row['id']}: {e}")
+                logger.warning(f"RAGAS scoring failed for log {row['id']}: {type(e).__name__}: {e}")
 
         return rows
     finally:
@@ -181,7 +182,7 @@ async def export_datasets(version: str = None):
                 content_type="application/x-ndjson",
             )
 
-    print(f"Exported: SFT={len(sft_lines)} pairs, DPO={len(dpo_lines)} pairs to {version}")
+    logger.info(f"Exported: SFT={len(sft_lines)} pairs, DPO={len(dpo_lines)} pairs to {version}")
 
 
 async def run_dspy_optimization():
@@ -202,7 +203,7 @@ async def run_dspy_optimization():
         await conn.close()
 
     if len(gold_logs) < 10:
-        print("Insufficient gold examples for DSPy optimization — skipping")
+        logger.info("Insufficient gold examples for DSPy optimization — skipping")
         return
 
     trainset = [
@@ -232,19 +233,19 @@ async def run_dspy_optimization():
 
     optimized = optimizer.compile(SynapseRAG(), trainset=trainset, num_trials=25)
     optimized.save("optimized_prompt.json")
-    print("DSPy MIPROv2 optimization complete")
+    logger.info("DSPy MIPROv2 optimization complete")
 
 
 async def score_and_export():
     """Nightly job: RAGAS score → JSONL export → DSPy optimization."""
-    print(f"[{datetime.utcnow()}] Nightly optimization starting...")
+    logger.info(f"[{datetime.utcnow()}] Nightly optimization starting...")
     try:
         await score_unscored_logs()
         await export_datasets()
         await run_dspy_optimization()
     except Exception as e:
-        print(f"Nightly optimization error: {e}")
-    print(f"[{datetime.utcnow()}] Nightly optimization complete")
+        logger.error(f"Nightly optimization error: {type(e).__name__}: {e}")
+    logger.info(f"[{datetime.utcnow()}] Nightly optimization complete")
 
 
 def start_scheduler():

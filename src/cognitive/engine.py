@@ -13,7 +13,7 @@ from src.cognitive.memory import load_memories, write_memory, load_session, appe
 from src.cognitive.planner import classify_query
 from src.cognitive.reflection import reflect_and_refine
 from src.cognitive.tools import ToolExecutor, BUILTIN_SCHEMAS
-from src.core.retrieval import hybrid_query, hybrid_query_with_confidence
+from src.core.retrieval import hybrid_query, hybrid_query_with_confidence, hybrid_query_with_retry
 from src.core.generation import generate, fast_complete
 
 logger = logging.getLogger(__name__)
@@ -70,13 +70,12 @@ Question: {question}"""
         return "\n\n".join(h.payload.get("text", "") for h in hits)
 
     # Step 2: Query entities table for matching entities
-    import asyncpg
-    db_url = os.environ.get("DATABASE_URL", "").replace("+asyncpg", "")
+    from src.core.db import get_pool
 
     entity_context_parts = []
     try:
-        conn = await asyncpg.connect(db_url)
-        try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
             for entity in entities[:5]:  # Limit to top 5 entities
                 name = entity.get("name", "")
                 if not name:
@@ -96,8 +95,6 @@ Question: {question}"""
                         f"- {row['entity_name']} ({row['entity_type']}): "
                         f"mentioned in {doc_count} documents, {row['mention_count']} times"
                     )
-        finally:
-            await conn.close()
     except Exception as e:
         logger.warning(f"[graph] Entity query failed: {type(e).__name__}: {e}")
 
@@ -147,8 +144,8 @@ async def cognitive_query(
 
     # ── STEP 3: Execute ─────────────────────────────────────────────────
     if query_type == "simple":
-        # Fast RAG path with CRAG: retrieve → check confidence → generate
-        hits, confidence = await hybrid_query_with_confidence(question, tenant_id)
+        # Fast RAG path with CRAG: retrieve → check confidence → query rewrite → generate
+        hits, confidence = await hybrid_query_with_retry(question, tenant_id)
         context = "\n\n".join(h.payload.get("text", "") for h in hits)
 
         # CRAG: If low confidence, try web search before generation
@@ -166,7 +163,7 @@ async def cognitive_query(
 
     elif query_type == "complex":
         # Enriched path: retrieve + session + memory context
-        hits, confidence = await hybrid_query_with_confidence(question, tenant_id)
+        hits, confidence = await hybrid_query_with_retry(question, tenant_id)
         knowledge = "\n\n".join(h.payload.get("text", "") for h in hits)
         full_ctx = f"Session:\n{session_str}\n\nMemory:\n{long_term_memory}\n\nKnowledge:\n{knowledge}"
         answer = await generate(question, [full_ctx])
@@ -183,7 +180,7 @@ async def cognitive_query(
 
     elif query_type == "tool":
         # Tool path: retrieve + LiteLLM function calling with parallel tool execution
-        hits, confidence = await hybrid_query_with_confidence(question, tenant_id)
+        hits, confidence = await hybrid_query_with_retry(question, tenant_id)
         context = "\n\n".join(h.payload.get("text", "") for h in hits)
 
         try:
@@ -203,7 +200,7 @@ async def cognitive_query(
 
     else:
         # Default fallback — simple path
-        hits, confidence = await hybrid_query_with_confidence(question, tenant_id)
+        hits, confidence = await hybrid_query_with_retry(question, tenant_id)
         context = "\n\n".join(h.payload.get("text", "") for h in hits)
         answer = await generate(question, [context])
 

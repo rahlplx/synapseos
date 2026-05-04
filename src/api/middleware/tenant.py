@@ -30,11 +30,19 @@ class TenantMiddleware(BaseHTTPMiddleware):
 
         # ── 2. Rate Limiting — sliding window BEFORE any ONNX work ──
         # This prevents CPU starvation from unauthenticated/over-limit requests
+        # Uses Lua script for atomic incr+expire (prevents race condition on crash)
         window = int(time.time() // 60)
         limit_key = f"rate:{tenant_id}:{window}"
-        count = await keydb.incr(limit_key)
-        if count == 1:
-            await keydb.expire(limit_key, 60)
+
+        # Atomic incr + expire via Lua script (prevents key leak on crash between incr and expire)
+        lua_incr_expire = """
+        local count = redis.call('INCR', KEYS[1])
+        if count == 1 then
+            redis.call('EXPIRE', KEYS[1], ARGV[1])
+        end
+        return count
+        """
+        count = await keydb.eval(lua_incr_expire, 1, limit_key, 60)
 
         # Check tenant-specific RPM limit (default: 60 RPM)
         rpm_limit = int(await keydb.get(f"tenant:{tenant_id}:rpm") or 60)
@@ -47,8 +55,10 @@ class TenantMiddleware(BaseHTTPMiddleware):
         if encrypted:
             try:
                 request.state.litellm_api_key = cipher.decrypt(encrypted).decode()
-            except Exception:
-                # Corrupted encryption — fall back to platform key
+            except Exception as e:
+                # Corrupted encryption — log and fall back to platform key
+                import logging
+                logging.getLogger(__name__).warning(f"[security] BYOK Fernet decrypt failed for tenant={tenant_id}: {type(e).__name__}")
                 request.state.litellm_api_key = None
         else:
             # No BYOK key configured — use platform default (Groq free tier)

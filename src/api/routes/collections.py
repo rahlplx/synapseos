@@ -24,7 +24,8 @@ async def get_collections(request: Request):
                 "vector_count": info.points_count or 0,
                 "status": info.status,
             }
-        except Exception:
+        except Exception as e:
+            logger.warning(f"[non-critical] get_collections failed for '{name}': {type(e).__name__}: {e}")
             result["collections"][name] = {
                 "vector_count": 0,
                 "status": "not_found",
@@ -37,14 +38,10 @@ async def get_collections(request: Request):
 async def get_analytics(request: Request):
     """RAGAS score trends + usage metrics for the last 7 days."""
     tenant_id = request.state.tenant_id
-    import asyncpg
+    from src.core.db import get_pool
 
-    db_url = os.environ.get("DATABASE_URL", "").replace("+asyncpg", "")
-    if not db_url:
-        return {"error": "Database not configured"}
-
-    conn = await asyncpg.connect(db_url)
-    try:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
         row = await conn.fetchrow("""
             SELECT
                 COUNT(*) as queries_7d,
@@ -61,8 +58,6 @@ async def get_analytics(request: Request):
             WHERE tenant_id = $1 AND created_at > now() - INTERVAL '7 days'
             GROUP BY query ORDER BY cnt DESC LIMIT 5
         """, tenant_id)
-    finally:
-        await conn.close()
 
     return {
         "ragas_7d": {
@@ -79,11 +74,10 @@ async def get_analytics(request: Request):
 async def delete_document(document_id: str, request: Request):
     """Remove a document from PostgreSQL and all its vectors from Qdrant."""
     tenant_id = request.state.tenant_id
-    import asyncpg
+    from src.core.db import get_pool
 
-    db_url = os.environ.get("DATABASE_URL", "").replace("+asyncpg", "")
-    conn = await asyncpg.connect(db_url)
-    try:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
         doc = await conn.fetchrow(
             "SELECT * FROM documents WHERE id=$1::uuid AND tenant_id=$2",
             document_id, tenant_id,
@@ -96,8 +90,6 @@ async def delete_document(document_id: str, request: Request):
             "DELETE FROM documents WHERE id=$1::uuid AND tenant_id=$2",
             document_id, tenant_id,
         )
-    finally:
-        await conn.close()
 
     # Delete vectors by source_url filter
     source_url = doc["source_url"]
