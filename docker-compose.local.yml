@@ -1,0 +1,142 @@
+# ─── SynapseOS Local Development ────────────────────────────────────────────
+# Only infrastructure services — run FastAPI locally with uvicorn for debugging.
+#
+# Usage:
+#   docker compose -f docker-compose.local.yml up -d    # Start infra
+#   docker compose -f docker-compose.local.yml ps        # Check health
+#   docker compose -f docker-compose.local.yml down      # Stop
+#
+# Then start API locally:
+#   source .env && uvicorn src.api.main:app --reload --port 8000
+#
+version: "3.9"
+
+x-logging: &logging
+  driver: "json-file"
+  options: { max-size: "10m", max-file: "3" }
+
+services:
+  # ─── Vector Database ───
+  qdrant:
+    image: qdrant/qdrant:v1.13.5
+    restart: unless-stopped
+    ports: ["6333:6333"]
+    volumes:
+      - qdrant_local_data:/var/lib/qdrant/storage
+      - ./config/qdrant.yaml:/qdrant/config/production.yaml
+    environment:
+      - QDRANT__STORAGE__PERFORMANCE__ASYNC_SCORER=true
+      - QDRANT__LOG_LEVEL=WARN
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    logging: *logging
+
+  # ─── Relational Database ───
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    ports: ["5432:5432"]
+    environment:
+      - POSTGRES_DB=synapseos
+      - POSTGRES_USER=synapse
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - PGDATA=/var/lib/postgresql/data/pgdata
+    volumes:
+      - pg_local_data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U synapse -d synapseos"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    logging: *logging
+
+  # ─── Cache + Queue (KeyDB is Redis-compatible) ───
+  keydb:
+    image: eqalpha/keydb:latest
+    restart: unless-stopped
+    ports: ["6379:6379"]
+    volumes:
+      - keydb_local_data:/data
+      - ./config/keydb.conf:/etc/keydb/keydb.conf
+    command: keydb-server /etc/keydb/keydb.conf
+    healthcheck:
+      test: ["CMD", "keydb-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    logging: *logging
+
+  # ─── Object Storage ───
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    ports: ["9000:9000", "9001:9001"]
+    environment:
+      - MINIO_ROOT_USER=${MINIO_USER}
+      - MINIO_ROOT_PASSWORD=${MINIO_PASSWORD}
+    volumes: [minio_local_data:/data]
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    logging: *logging
+
+  # ─── LiteLLM Proxy (optional — can use direct LiteLLM SDK) ───
+  litellm:
+    image: ghcr.io/berriai/litellm:main-latest
+    restart: unless-stopped
+    ports: ["4000:4000"]
+    volumes: ["./config/litellm.yaml:/app/config.yaml"]
+    environment:
+      - REDIS_URL=redis://keydb:6379
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+    command: --config /app/config.yaml --port 4000
+    depends_on:
+      keydb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging: *logging
+
+  # ─── Observability (optional for local dev) ───
+  langfuse:
+    image: langfuse/langfuse:3
+    restart: unless-stopped
+    ports: ["3100:3000"]
+    environment:
+      - DATABASE_URL=postgresql://synapse:${POSTGRES_PASSWORD}@postgres:5432/synapseos
+      - NEXTAUTH_SECRET=${LANGFUSE_NEXTAUTH_SECRET}
+      - SALT=${LANGFUSE_SALT}
+      - NEXTAUTH_URL=http://localhost:3100
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging: *logging
+
+volumes:
+  qdrant_local_data:
+  pg_local_data:
+  keydb_local_data:
+  minio_local_data:

@@ -1,9 +1,10 @@
-"""Langfuse trace middleware — attaches trace to every /v1/ request."""
+"""Langfuse trace middleware — attaches trace to every /v1/ request.
+Compatible with Langfuse v4+ (no decorators module, uses start_observation).
+"""
 import os
 from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
 from langfuse import Langfuse
-from langfuse.decorators import langfuse_context
 
 langfuse = Langfuse(
     public_key=os.environ.get("LANGFUSE_PUBLIC_KEY", ""),
@@ -19,17 +20,23 @@ class LangfuseMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         tenant = getattr(request.state, "tenant_id", "unknown")
-        trace = langfuse.trace(
+
+        # Langfuse v4: use start_observation for tracing
+        trace_id = langfuse.create_trace_id()
+        observation = langfuse.start_observation(
             name=request.url.path,
+            trace_id=trace_id,
             metadata={"tenant": tenant, "method": request.method},
         )
-        langfuse_context.configure(trace=trace)
+
+        # Store trace_id on request state for downstream use
+        request.state.langfuse_trace_id = trace_id
 
         try:
             response = await call_next(request)
-            trace.update(output={"status": response.status_code})
+            observation.update(output={"status": response.status_code})
         except Exception as e:
-            trace.update(output={"status": 500, "error": str(e)})
+            observation.update(output={"status": 500, "error": str(e)})
             raise
         finally:
             langfuse.flush()

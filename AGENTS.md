@@ -121,23 +121,40 @@ Never use Celery — use KeyDB + BackgroundTasks
 
 ## Build Phase Status
 
-Phase 1 Core RAG (Days 1-4)
-  Day 1: Docker services live
-  Day 2: Qdrant + ingest
-  Day 3: Hybrid query
-  Day 4: /v1/query endpoint
+Phase 1 Core RAG (Days 1-4) — CODE COMPLETE
+  Day 1: Docker services live (docker-compose.local.yml ready)
+  Day 2: Qdrant + ingest (code complete, tested imports)
+  Day 3: Hybrid query (code complete, SparseVector fixed)
+  Day 4: /v1/query endpoint (code complete, reflection wired)
 
-Phase 2 SDK + Edge (Days 5-8)
-  Day 5: Python SDK
-  Day 6: TypeScript SDK + widget
-  Day 7: MCP server
-  Day 8: Cloudflare Workers
+Phase 2 SDK + Edge (Days 5-8) — CODE COMPLETE
+  Day 5: Python SDK (code complete)
+  Day 6: TypeScript SDK + widget (code complete)
+  Day 7: MCP server (code complete)
+  Day 8: Cloudflare Workers (code complete)
 
-Phase 3 Cognitive (Days 9-12)
-  Day 9: mem0 memory
-  Day 10: Self-reflection
-  Day 11: Tool executor
-  Day 12: /v1/think complete
+Phase 3 Cognitive (Days 9-12) — CODE COMPLETE
+  Day 9: mem0 memory (code complete, lazy init)
+  Day 10: Self-reflection (code complete, 1 retry max)
+  Day 11: Tool executor (code complete, 4 tools + safety)
+  Day 12: /v1/think complete (code complete, 3 paths)
+
+Current: LOCAL TESTING → CLOUD DEPLOY LATER
+  All code is import-clean and ready for local testing with Docker infra.
+
+---
+
+## Local Development Setup
+
+1. Start infrastructure: `docker compose -f docker-compose.local.yml up -d`
+2. Create .env: `cp .env.example .env` (add your GROQ_API_KEY)
+3. Initialize DB: `docker compose -f docker-compose.local.yml exec -T postgres psql -U synapse -d synapseos < scripts/init-db.sql`
+4. Install Python deps: `pip install -r requirements.txt`
+5. Create collections: `python3 scripts/setup_collection.py`
+6. Start API: `source .env && uvicorn src.api.main:app --reload --port 8000`
+7. Test: `curl http://localhost:8000/health`
+
+Quick start: `./scripts/setup-local.sh` (automates steps 1-6)
 
 ---
 
@@ -179,3 +196,29 @@ Phase 3 Cognitive (Days 9-12)
   - python3 scripts/test_think.py
 - Status: ✅ Code complete — all 12 days of build plan executed, all bugs fixed
 - Next: Deploy to Oracle ARM, run Docker services, execute test scripts
+
+## Session 2026-05-04 — Local-First Setup + Compatibility Fixes
+- Built: Local development workflow + package compatibility fixes
+- Strategy: Test everything locally first, then shift to Oracle ARM cloud later
+- Files changed:
+  - .env: Created with localhost URLs and generated secrets
+  - docker-compose.local.yml: Created — infra-only services (no API/worker containers)
+  - scripts/setup-local.sh: Created — one-command local setup automation
+  - src/api/middleware/langfuse_mw.py: Fixed — updated from Langfuse v2 (trace/decorators) to v4 (start_observation)
+  - src/worker/nightly_optimizer.py: Fixed — updated ragas imports for v0.4+ (Faithfulness, AnswerRelevancy, ContextPrecision classes)
+  - scripts/init-db.sql: Fixed — added missing source_filename column to documents table
+  - scripts/test_retrieval.py: Fixed — replaced sparse_vec.as_object() with models.SparseVector()
+  - requirements.txt: Updated with broader version ranges for compatibility
+  - AGENTS.md: Updated build status to CODE COMPLETE, added local dev setup section
+- Verification:
+  - All 18 SynapseOS modules import successfully
+  - FastAPI app creates with all 15 routes registered
+  - All Python files pass syntax check
+  - Dependencies installed: qdrant-client, fastembed, litellm, crawl4ai, docling, mem0ai, ragas, dspy-ai, sentence-transformers
+- Bugs fixed:
+  - Langfuse v4 removed trace() method and langfuse.decorators — replaced with start_observation()
+  - ragas v0.4 deprecated old function imports — replaced with class-based metrics
+  - documents table missing source_filename column referenced in collections.py
+  - test_retrieval.py used as_object() which doesn't exist — replaced with SparseVector
+- Status: ✅ Code complete and import-clean for local testing
+- Next: Start Docker infra → run test scripts → verify end-to-end on localhost

@@ -11,7 +11,14 @@ from io import BytesIO
 import boto3
 import dspy
 from ragas import evaluate
-from ragas.metrics import faithfulness, answer_relevancy, context_precision
+# ragas v0.4+ — use class-based metrics (old function imports are deprecated)
+from ragas.metrics._faithfulness import Faithfulness
+from ragas.metrics._answer_relevance import AnswerRelevancy
+from ragas.metrics._context_precision import ContextPrecision
+
+faithfulness = Faithfulness()
+answer_relevancy = AnswerRelevancy()
+context_precision = ContextPrecision()
 from datasets import Dataset
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 

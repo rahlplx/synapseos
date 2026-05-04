@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS documents (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id VARCHAR(64) NOT NULL,
     source_url TEXT,
+    source_filename TEXT,
     minio_raw_path TEXT,
     minio_parsed_path TEXT,
     chunk_count INTEGER DEFAULT 0,

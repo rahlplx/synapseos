@@ -50,7 +50,7 @@ async def test_hybrid():
         collection_name=COLLECTION,
         prefetch=[
             models.Prefetch(query=dense_vec.tolist(), using="dense", limit=30, filter=tenant_filter),
-            models.Prefetch(query=sparse_vec.as_object(), using="sparse", limit=30, filter=tenant_filter),
+            models.Prefetch(query=models.SparseVector(indices=sparse_vec.indices.tolist(), values=sparse_vec.values.tolist()), using="sparse", limit=30, filter=tenant_filter),
         ],
         query=models.FusionQuery(fusion=models.Fusion.RRF),
         with_payload=True,
