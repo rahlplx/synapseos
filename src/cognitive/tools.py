@@ -1,11 +1,13 @@
 """
 L7 — Tool Registry + Executor
 4 built-in tools + tenant-defined custom tools (any HTTP endpoint).
-ARM safe: web_search capped at 3000 chars, calculate uses safe eval, call_api has 15s timeout.
+ARM safe: web_search capped at 3000 chars, calculate uses AST (no eval), call_api has 15s timeout.
 """
+import ast
 import asyncio
 import json
 import logging
+import operator
 import httpx
 from crawl4ai import AsyncWebCrawler, CrawlerRunConfig, CacheMode
 
@@ -46,7 +48,7 @@ BUILTIN_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "calculate",
-            "description": "Evaluate a mathematical expression safely. Supports +, -, *, /, parentheses.",
+            "description": "Evaluate a mathematical expression safely. Supports +, -, *, /, parentheses, decimals.",
             "parameters": {
                 "type": "object",
                 "properties": {"expression": {"type": "string", "description": "Math expression"}},
@@ -71,11 +73,52 @@ BUILTIN_SCHEMAS = [
     },
 ]
 
-CALC_ALLOWED_CHARS = set("0123456789+-*/()., ")
+
+# ─── Safe Calculator (AST-based — NO eval()) ──────────────────────────────────
+# Maps AST operators to Python operator functions.
+# Only supports: +, -, *, /, **, (), numbers (int/float).
+# This is secure by construction — arbitrary code CANNOT be executed.
+
+_AST_OPS = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.Div: operator.truediv,
+    ast.USub: operator.neg,    # Unary minus (e.g., -5)
+    ast.UAdd: operator.pos,    # Unary plus (e.g., +5)
+    ast.Pow: operator.pow,     # Exponentiation (e.g., 2**3)
+}
+
+
+def _safe_eval(node: ast.AST) -> float:
+    """Recursively evaluate an AST node using only allowed operations.
+
+    Raises TypeError for any disallowed node type (calls, attributes, etc.).
+    """
+    if isinstance(node, ast.Constant):  # Python 3.8+: int, float
+        if isinstance(node.value, (int, float)):
+            return node.value
+        raise TypeError(f"Unsupported constant type: {type(node.value).__name__}")
+    elif isinstance(node, ast.UnaryOp):
+        op_func = _AST_OPS.get(type(node.op))
+        if op_func is None:
+            raise TypeError(f"Unsupported unary operator: {type(node.op).__name__}")
+        return op_func(_safe_eval(node.operand))
+    elif isinstance(node, ast.BinOp):
+        op_func = _AST_OPS.get(type(node.op))
+        if op_func is None:
+            raise TypeError(f"Unsupported binary operator: {type(node.op).__name__}")
+        return op_func(_safe_eval(node.left), _safe_eval(node.right))
+    else:
+        raise TypeError(f"Unsupported expression: {type(node).__name__}")
 
 
 class ToolExecutor:
-    """Executes built-in and tenant-defined tools. Never crashes — returns error string on failure."""
+    """Executes built-in and tenant-defined tools.
+
+    Never crashes — returns error string on failure.
+    All methods return strings for consistent LLM consumption.
+    """
 
     async def execute(self, tool_name: str, tool_input: dict, tenant_id: str) -> str:
         """Execute a tool by name."""
@@ -114,16 +157,29 @@ class ToolExecutor:
             return text[:3000] if text else "No web search results found."
 
     def _calculate(self, tool_input: dict) -> str:
-        """Safely evaluate a mathematical expression. Only allows 0-9 and basic operators."""
+        """Safely evaluate a mathematical expression using AST parsing.
+
+        This uses Python's `ast` module to parse the expression into an
+        abstract syntax tree, then evaluates only allowed node types
+        (numbers, +, -, *, /, **, parentheses). No `eval()` is used —
+        arbitrary code execution is impossible by construction.
+        """
         expr = tool_input.get("expression", "")
-        if not all(c in CALC_ALLOWED_CHARS for c in expr):
-            return "Error: unsafe expression — only numbers and basic operators allowed"
+        if not expr.strip():
+            return "Error: empty expression"
         try:
-            return str(eval(expr))  # noqa: S307 — input is sanitized above
+            tree = ast.parse(expr, mode="eval")
+            result = _safe_eval(tree.body)
+            # Format: no trailing .0 for integers
+            return str(int(result)) if isinstance(result, float) and result == int(result) else str(result)
         except ZeroDivisionError:
             return "Error: division by zero"
-        except Exception as e:
-            return f"Error: {str(e)[:100]}"
+        except TypeError as e:
+            return f"Error: {str(e)}"
+        except (SyntaxError, ValueError) as e:
+            return f"Error: invalid expression — {str(e)}"
+        except OverflowError:
+            return "Error: result too large"
 
     async def _call_api(self, tool_input: dict, tenant_id: str) -> str:
         """Call a tenant-registered custom API tool. 15s timeout. Output capped at 3000 chars."""
@@ -146,8 +202,8 @@ class ToolExecutor:
             try:
                 auth = get_cipher().decrypt(tool["auth_header"]).decode()
                 headers["Authorization"] = auth
-            except Exception as e:
-                logger.warning(f"[security] Fernet decrypt failed for tool '{tool_name}': {type(e).__name__}")
+            except Exception:
+                logger.warning(f"[security] Fernet decrypt failed for tool '{tool_name}'")
 
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.request(

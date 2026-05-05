@@ -1,20 +1,21 @@
 """POST /v1/feedback — Thumbs up/down on a trace"""
 from fastapi import APIRouter, Request
-from pydantic import BaseModel
 from langfuse import Langfuse
 
-router = APIRouter()
+from src.api.models import FeedbackRequest
+
+router = APIRouter(tags=["feedback"])
 langfuse = Langfuse()
 
 
-class FeedbackRequest(BaseModel):
-    trace_id: str
-    rating: int  # +1 or -1
-
-
-@router.post("/feedback")
+@router.post("/feedback", summary="Submit feedback", response_description="Confirmation of recorded feedback")
 async def feedback_endpoint(body: FeedbackRequest, request: Request):
-    """Submit thumbs up/down on a RAG response."""
+    """Submit thumbs up/down on a RAG response.
+
+    Records user feedback in Langfuse for analytics and self-improvement.
+    Use the `trace_id` from the query/think response to identify which
+    answer the feedback applies to.
+    """
     tenant_id = getattr(request.state, "tenant_id", "unknown")
     langfuse.score(
         trace_id=body.trace_id,

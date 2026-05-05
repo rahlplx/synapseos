@@ -1,15 +1,32 @@
 """SynapseOS — FastAPI Entry Point
+
+Middleware order: TenantMiddleware runs FIRST (rate limit + BYOK before any route).
 Docs: /docs (Swagger) | /redoc
-Middleware order matters: TenantMiddleware runs FIRST (rate limit + BYOK before any route)
 """
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
-from src.core.config import ENCRYPTION_KEY
 from src.api.middleware.tenant import TenantMiddleware
 from src.api.middleware.langfuse_mw import LangfuseMiddleware
 from src.api.routes import query, think, ingest, feedback, collections
+
+API_DESCRIPTION = """
+## SynapseOS — Self-Improving BYOK RAG Platform
+
+Two endpoints for different latency/quality tradeoffs:
+
+| Endpoint | Latency | Use Case |
+|----------|---------|----------|
+| `POST /v1/query` | ~235ms | Fast RAG — retrieve + generate |
+| `POST /v1/think` | ~865ms | Cognitive — memory + reasoning + tools + reflection |
+
+### Authentication
+All `/v1/` endpoints require `X-Tenant-ID` header. Rate limited at 60 RPM per tenant.
+
+### Streaming
+Both endpoints support SSE streaming. Set `stream: true` in the request body.
+"""
 
 
 @asynccontextmanager
@@ -33,9 +50,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="SynapseOS",
-    description="Self-improving BYOK RAG platform with cognitive engine",
+    description=API_DESCRIPTION,
     version="1.0.0",
     lifespan=lifespan,
+    contact={"name": "SynapseOS", "url": "https://github.com/rahlplx/synapseos"},
+    license_info={"name": "MIT"},
 )
 
 # ── Middleware (order: last added = first executed) ──
@@ -51,7 +70,10 @@ app.include_router(feedback.router, prefix="/v1")
 app.include_router(collections.router, prefix="/v1")
 
 
-@app.get("/health")
+@app.get("/health", summary="Health check", tags=["system"])
 async def health():
-    """Health check — skipped by TenantMiddleware (no auth required)."""
+    """Health check endpoint. No authentication required.
+
+    Returns OK status and API version. Skipped by TenantMiddleware.
+    """
     return {"status": "ok", "version": "1.0.0"}

@@ -1,7 +1,11 @@
 """
 L7 — Self-Reflection
-Uses Groq Llama-3.1-8b-instant (fast, ~200ms) to judge answer quality.
-Adds ~200ms. Max 1 retry cycle.
+
+Evaluates answer quality using Groq Llama-3.1-8b-instant (~200ms per evaluation).
+If the combined score falls below the threshold, the answer is retried with
+the critique injected into the prompt. Maximum 1 retry cycle to bound latency.
+
+Combined score formula: 0.4 * faithfulness + 0.3 * relevancy + 0.3 * completeness
 """
 import json
 import logging
@@ -39,26 +43,32 @@ async def reflect_and_refine(
     threshold: float = 0.70,
     max_retries: int = 1,
 ) -> tuple[str, dict]:
-    """Evaluate answer quality. Retry with critique if below threshold.
+    """Evaluate answer quality and retry with critique if below threshold.
 
-    Returns (final_answer, reflection_scores).
-    Fast model (Groq Llama-8b) keeps reflection latency ~200ms.
-    Never crashes — returns original answer on any error.
+    Args:
+        question: The original user question.
+        context: Retrieved context used to generate the answer.
+        answer: The generated answer to evaluate.
+        threshold: Combined score threshold for acceptance (default 0.70).
+        max_retries: Maximum number of retry cycles (default 1).
+
+    Returns:
+        Tuple of (final_answer, reflection_scores_dict).
+        Never crashes — returns original answer on any error.
     """
     for attempt in range(max_retries + 1):
         try:
             raw = await fast_complete(
                 REFLECTION_PROMPT.format(
                     question=question,
-                    context=context[:1500],  # Cap context for speed
+                    context=context[:1500],
                     answer=answer,
                 ),
                 max_tokens=200,
                 json_mode=True,
             )
             scores = json.loads(raw)
-        except (json.JSONDecodeError, Exception) as e:
-            # Malformed JSON or other error — log and return original answer as-is
+        except Exception as e:
             logger.warning(f"[non-critical] Reflection score parse failed: {type(e).__name__}: {e}")
             return answer, {}
 

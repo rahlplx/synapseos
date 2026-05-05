@@ -2,21 +2,22 @@
 import time
 from uuid import uuid4
 from fastapi import APIRouter, Request, BackgroundTasks, UploadFile, File
-from pydantic import BaseModel, Field
+
+from src.api.models import IngestRequest
 from src.core.ingestion import ingest_urls, ingest_file
 from src.core.clients import get_keydb
 
-router = APIRouter()
+router = APIRouter(tags=["ingestion"])
 
 
-class IngestRequest(BaseModel):
-    urls: list[str] = Field(..., max_length=10, description="List of URLs to ingest (max 10)")
-    metadata: dict = Field(default_factory=dict)
-
-
-@router.post("/ingest")
+@router.post("/ingest", summary="Ingest URLs", response_description="Job ID for tracking")
 async def ingest_endpoint(body: IngestRequest, request: Request, background_tasks: BackgroundTasks):
-    """Queue document ingestion. Returns job ID immediately."""
+    """Queue document ingestion from URLs.
+
+    Returns a job ID immediately. Poll `GET /v1/ingest/{job_id}` for status.
+    Maximum 10 URLs per request. Each URL is scraped, chunked, deduplicated,
+    embedded (dense + sparse), and upserted to Qdrant.
+    """
     tenant_id = request.state.tenant_id
     job_id = str(uuid4())
     keydb = get_keydb()
@@ -28,13 +29,17 @@ async def ingest_endpoint(body: IngestRequest, request: Request, background_task
     return {"job_id": job_id, "status": "queued", "document_count": len(body.urls)}
 
 
-@router.post("/ingest/file")
+@router.post("/ingest/file", summary="Ingest uploaded file", response_description="Job ID for tracking")
 async def ingest_file_endpoint(
     request: Request,
     background_tasks: BackgroundTasks,
-    file: UploadFile = File(...),
+    file: UploadFile = File(..., description="PDF, DOCX, TXT, or MD file"),
 ):
-    """Upload a file (PDF, DOCX, TXT, MD) for ingestion."""
+    """Upload a file (PDF, DOCX, TXT, MD) for ingestion.
+
+    Returns a job ID immediately. Poll `GET /v1/ingest/{job_id}` for status.
+    The file is parsed with Docling, chunked, deduplicated, embedded, and upserted.
+    """
     tenant_id = request.state.tenant_id
     job_id = str(uuid4())
     content = await file.read()
@@ -47,9 +52,13 @@ async def ingest_file_endpoint(
     return {"job_id": job_id, "status": "queued"}
 
 
-@router.get("/ingest/{job_id}")
+@router.get("/ingest/{job_id}", summary="Check ingestion status", response_description="Job status and progress")
 async def ingest_status(job_id: str, request: Request):
-    """Poll ingestion job status. Verifies tenant ownership."""
+    """Poll ingestion job status.
+
+    Returns current status (queued/processing/done/failed), chunk count,
+    and elapsed time. Verifies tenant ownership to prevent cross-tenant access.
+    """
     tenant_id = request.state.tenant_id
     keydb = get_keydb()
     data = await keydb.hgetall(f"job:{job_id}")

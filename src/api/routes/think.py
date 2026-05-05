@@ -1,29 +1,33 @@
 """POST /v1/think — Full cognitive engine (memory + reasoning + tools + reflection)"""
+import json
 import time
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+
+from src.api.models import ThinkRequest, _latency_ms
 from src.cognitive.engine import cognitive_query
-from src.core.generation import generate_stream
 
-router = APIRouter()
-
-
-class ThinkRequest(BaseModel):
-    question: str = Field(..., max_length=2000, description="Query question (max 2000 chars)")
-    session_id: str
-    user_id: str
-    stream: bool = False
+router = APIRouter(tags=["cognitive"])
 
 
-@router.post("/think")
+@router.post("/think", summary="Cognitive thinking query", response_description="Deep answer with reasoning steps")
 async def think_endpoint(body: ThinkRequest, request: Request):
+    """Full cognitive engine endpoint (~865ms target).
+
+    Pipeline: Memory load (parallel) → Query classification →
+    Route to simple/complex/tool/graph path → Self-reflection → Memory write.
+
+    Supports 4 query types:
+    - **simple**: Fast RAG with CRAG confidence gate
+    - **complex**: Multi-step reasoning with session + memory context
+    - **tool**: LiteLLM function calling with parallel tool execution
+    - **graph**: Cross-document entity aggregation (LazyGraphRAG pattern)
+    """
     tenant_id = request.state.tenant_id
     api_key = getattr(request.state, "litellm_api_key", None)
     start = time.perf_counter()
 
     if body.stream:
-        # For streaming: run cognitive_query, then stream the answer
         result = await cognitive_query(
             question=body.question,
             session_id=body.session_id,
@@ -32,9 +36,7 @@ async def think_endpoint(body: ThinkRequest, request: Request):
             tenant_api_key=api_key,
             stream=False,
         )
-        # Stream the answer in SSE format
         async def _stream_cognitive():
-            import json
             yield f"data: {json.dumps({'chunk': result.answer})}\n\n"
             yield f"data: {json.dumps({
                 'done': True,
@@ -43,6 +45,7 @@ async def think_endpoint(body: ThinkRequest, request: Request):
                 'reflection_scores': result.reflection_scores,
                 'memories_recalled': result.memories_recalled,
                 'tools_used': result.tools_used,
+                'confidence': result.confidence,
             })}\n\n"
 
         return StreamingResponse(
@@ -58,7 +61,6 @@ async def think_endpoint(body: ThinkRequest, request: Request):
         tenant_id=tenant_id,
         tenant_api_key=api_key,
     )
-    latency_ms = int((time.perf_counter() - start) * 1000)
 
     return {
         "answer": result.answer,
@@ -67,5 +69,6 @@ async def think_endpoint(body: ThinkRequest, request: Request):
         "reflection_scores": result.reflection_scores,
         "memories_recalled": result.memories_recalled,
         "tools_used": result.tools_used,
-        "latency_ms": latency_ms,
+        "confidence": result.confidence,
+        "latency_ms": _latency_ms(start),
     }

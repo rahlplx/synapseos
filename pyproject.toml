@@ -12,3 +12,38 @@ ignore = ["E501"]
 
 [tool.ruff.format]
 quote-style = "double"
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+ignore_missing_imports = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+module = [
+    "qdrant_client.*",
+    "fastembed.*",
+    "sentence_transformers.*",
+    "crawl4ai.*",
+    "docling.*",
+    "mem0.*",
+    "langfuse.*",
+    "litellm.*",
+    "ragas.*",
+    "dspy.*",
+    "boto3.*",
+    "minio.*",
+    "asyncpg.*",
+    "redis.*",
+    "httpx.*",
+    "cryptography.*",
+    "apscheduler.*",
+    "semchunk.*",
+    "tiktoken.*",
+    "datasets.*",
+]
+ignore_missing_imports = true

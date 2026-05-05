@@ -1,7 +1,15 @@
 """
 L7 — Query Classifier + DSPy ReAct Planner
-Classifier uses Groq Llama-3.1-8b-instant (fast, cheap). ReAct uses DSPy for complex reasoning.
-Supports 4 query types: simple, complex, tool, graph.
+
+Classifies queries into one of four types using Groq Llama-3.1-8b-instant
+(~100ms per classification). For complex reasoning, provides a DSPy ReAct
+module that can perform multi-step tool-augmented reasoning.
+
+Query types:
+    - simple: One factual lookup, single piece of info needed
+    - complex: Multiple reasoning steps, synthesis from retrieved docs
+    - tool: Requires external action (web search, API call, calculation)
+    - graph: Cross-document relationship query (LazyGraphRAG pattern)
 """
 import logging
 import dspy
@@ -22,7 +30,15 @@ Category:"""
 
 async def classify_query(query: str) -> str:
     """Classify a query into simple/complex/tool/graph.
-    Uses fast Groq 8b model (~100ms). Defaults to 'simple' on any failure.
+
+    Uses fast Groq 8b model (~100ms). Defaults to 'simple' on any failure
+    to ensure the system never crashes due to classification errors.
+
+    Args:
+        query: The user's question to classify.
+
+    Returns:
+        One of: "simple", "complex", "tool", "graph"
     """
     try:
         result = await fast_complete(CLASSIFY_PROMPT.format(query=query), max_tokens=5)
@@ -34,9 +50,12 @@ async def classify_query(query: str) -> str:
 
 
 class SynapseReAct(dspy.Module):
-    """Multi-step reasoning agent. Max 5 iterations before forced synthesis.
-    Tools available: retrieve_knowledge, web_search, call_api, calculate.
+    """Multi-step reasoning agent using DSPy ReAct.
+
+    Maximum 5 iterations before forced synthesis. Available tools:
+    retrieve_knowledge, web_search, call_api, calculate.
     """
+
     def __init__(self, tools: list, max_iters: int = 5):
         super().__init__()
         self.react = dspy.ReAct(
@@ -46,6 +65,7 @@ class SynapseReAct(dspy.Module):
         )
 
     def forward(self, question: str, session_context: str, long_term_memory: str):
+        """Execute the ReAct reasoning loop."""
         return self.react(
             question=question,
             session_context=session_context,
