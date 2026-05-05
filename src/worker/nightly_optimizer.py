@@ -162,7 +162,10 @@ async def export_datasets(version: str = None):
 
 
 async def run_dspy_optimization():
-    """DSPy MIPROv2 nightly prompt optimization. Requires >= 10 gold examples."""
+    """DSPy MIPROv2 nightly prompt optimization. Requires >= 10 gold examples.
+    Optimized prompt is persisted to MinIO instead of local filesystem
+    to ensure persistence across container restarts.
+    """
     pool = await get_pool()
     async with pool.acquire() as conn:
         gold_logs = await conn.fetch("""
@@ -201,8 +204,37 @@ async def run_dspy_optimization():
     )
 
     optimized = optimizer.compile(SynapseRAG(), trainset=trainset, num_trials=25)
-    optimized.save("optimized_prompt.json")
-    logger.info("DSPy MIPROv2 optimization complete")
+
+    # Persist to MinIO instead of local filesystem
+    version = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    minio_key = f"optimization/{version}/optimized_prompt.json"
+
+    try:
+        import tempfile
+        from src.core.ingestion import upload_to_minio
+        from src.core.config import MINIO_DATASET_BUCKET
+
+        # Save to temp file, then upload to MinIO
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            optimized.save(f.name)
+            f.seek(0)
+            prompt_json = f.read()
+
+        await upload_to_minio(
+            MINIO_DATASET_BUCKET,
+            prompt_json.encode("utf-8"),
+            minio_key,
+            "application/json",
+        )
+
+        # Also save locally as fallback
+        optimized.save("optimized_prompt.json")
+
+        logger.info(f"DSPy MIPROv2 optimization complete — persisted to MinIO: {minio_key}")
+    except Exception as e:
+        # Fallback: save locally if MinIO upload fails
+        optimized.save("optimized_prompt.json")
+        logger.warning(f"[non-critical] MinIO upload failed, saved locally: {type(e).__name__}: {e}")
 
 
 async def score_and_export():

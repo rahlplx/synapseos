@@ -1,7 +1,11 @@
 /**
  * SynapseOS TypeScript SDK — BYOK RAG with cognitive engine
+ * Includes automatic retry with exponential backoff on transient failures.
  * Install: npm install @synapseos/sdk
  */
+
+// ─── Types ───────────────────────────────────────────────────────────────────
+
 export interface QueryResult {
   answer: string;
   sources: Source[];
@@ -31,26 +35,105 @@ export interface IngestJob {
   status: string;
 }
 
+export interface RetryConfig {
+  maxRetries: number;   // Default: 3
+  baseDelay: number;    // Base delay in ms, default: 1000
+}
+
+// ─── Retry Logic ─────────────────────────────────────────────────────────────
+
+const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
+
+function shouldRetry(resp?: Response, error?: unknown): boolean {
+  if (error) {
+    // Retry on network errors (TypeError from fetch failures)
+    return error instanceof TypeError || error instanceof DOMException;
+  }
+  if (resp) {
+    return RETRYABLE_STATUS.has(resp.status);
+  }
+  return false;
+}
+
+async function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchWithRetry(
+  url: string,
+  options: RequestInit,
+  retryConfig: RetryConfig,
+): Promise<Response> {
+  const { maxRetries, baseDelay } = retryConfig;
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const resp = await fetch(url, options);
+
+      if (!resp.ok && shouldRetry(resp) && attempt < maxRetries) {
+        const delay = baseDelay * Math.pow(2, attempt);
+        console.warn(
+          `[SynapseOS retry] Attempt ${attempt + 1}/${maxRetries + 1} failed: ` +
+          `${resp.status} ${resp.statusText}. Retrying in ${delay}ms...`
+        );
+        await sleep(delay);
+        continue;
+      }
+
+      return resp;
+    } catch (error) {
+      lastError = error;
+      if (shouldRetry(undefined, error) && attempt < maxRetries) {
+        const delay = baseDelay * Math.pow(2, attempt);
+        console.warn(
+          `[SynapseOS retry] Attempt ${attempt + 1}/${maxRetries + 1} failed: ` +
+          `${error}. Retrying in ${delay}ms...`
+        );
+        await sleep(delay);
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  throw lastError;
+}
+
+// ─── Client ──────────────────────────────────────────────────────────────────
+
 export class SynapseOSClient {
   private base: string;
   private headers: HeadersInit;
+  private retryConfig: RetryConfig;
 
-  constructor(config: { baseUrl: string; apiKey: string; tenantId: string }) {
+  constructor(
+    config: { baseUrl: string; apiKey: string; tenantId: string },
+    retryConfig?: Partial<RetryConfig>,
+  ) {
     this.base = config.baseUrl.replace(/\/$/, "") + "/v1";
     this.headers = {
       "Authorization": `Bearer ${config.apiKey}`,
       "X-Tenant-ID": config.tenantId,
       "Content-Type": "application/json",
     };
+    this.retryConfig = {
+      maxRetries: retryConfig?.maxRetries ?? 3,
+      baseDelay: retryConfig?.baseDelay ?? 1000,
+    };
   }
 
-  /** Non-streaming RAG query. Returns full answer with sources. */
+  /** Non-streaming RAG query. Returns full answer with sources. Auto-retries on transient failures. */
   async query(question: string, topK = 5, useHyde = false): Promise<QueryResult> {
-    const resp = await fetch(`${this.base}/query`, {
-      method: "POST",
-      headers: this.headers,
-      body: JSON.stringify({ question, top_k: topK, stream: false, use_hyde: useHyde }),
-    });
+    const resp = await fetchWithRetry(
+      `${this.base}/query`,
+      {
+        method: "POST",
+        headers: this.headers,
+        body: JSON.stringify({ question, top_k: topK, stream: false, use_hyde: useHyde }),
+      },
+      this.retryConfig,
+    );
     if (!resp.ok) {
       throw new Error(`SynapseOS error: ${resp.status} ${await resp.text()}`);
     }
@@ -70,11 +153,15 @@ export class SynapseOSClient {
 
   /** Streaming RAG query. Yields answer chunks in real-time via SSE. */
   async *queryStream(question: string, topK = 5, useHyde = false): AsyncGenerator<string> {
-    const resp = await fetch(`${this.base}/query`, {
-      method: "POST",
-      headers: this.headers,
-      body: JSON.stringify({ question, top_k: topK, stream: true, use_hyde: useHyde }),
-    });
+    const resp = await fetchWithRetry(
+      `${this.base}/query`,
+      {
+        method: "POST",
+        headers: this.headers,
+        body: JSON.stringify({ question, top_k: topK, stream: true, use_hyde: useHyde }),
+      },
+      this.retryConfig,
+    );
     if (!resp.ok) {
       throw new Error(`SynapseOS error: ${resp.status}`);
     }
@@ -107,13 +194,17 @@ export class SynapseOSClient {
     }
   }
 
-  /** Full cognitive query with memory + reasoning + tools + reflection. */
+  /** Full cognitive query with memory + reasoning + tools + reflection. Auto-retries on transient failures. */
   async think(question: string, sessionId: string, userId: string): Promise<ThinkResult> {
-    const resp = await fetch(`${this.base}/think`, {
-      method: "POST",
-      headers: this.headers,
-      body: JSON.stringify({ question, session_id: sessionId, user_id: userId, stream: false }),
-    });
+    const resp = await fetchWithRetry(
+      `${this.base}/think`,
+      {
+        method: "POST",
+        headers: this.headers,
+        body: JSON.stringify({ question, session_id: sessionId, user_id: userId, stream: false }),
+      },
+      this.retryConfig,
+    );
     if (!resp.ok) {
       throw new Error(`SynapseOS error: ${resp.status}`);
     }
@@ -129,13 +220,17 @@ export class SynapseOSClient {
     };
   }
 
-  /** Queue document ingestion. Returns job ID immediately. */
+  /** Queue document ingestion. Returns job ID immediately. Auto-retries on transient failures. */
   async ingest(urls: string[], metadata?: Record<string, string>): Promise<IngestJob> {
-    const resp = await fetch(`${this.base}/ingest`, {
-      method: "POST",
-      headers: this.headers,
-      body: JSON.stringify({ urls, metadata }),
-    });
+    const resp = await fetchWithRetry(
+      `${this.base}/ingest`,
+      {
+        method: "POST",
+        headers: this.headers,
+        body: JSON.stringify({ urls, metadata }),
+      },
+      this.retryConfig,
+    );
     if (!resp.ok) {
       throw new Error(`SynapseOS error: ${resp.status}`);
     }
@@ -145,11 +240,15 @@ export class SynapseOSClient {
 
   /** Submit thumbs up (+1) or thumbs down (-1) on a response. */
   async feedback(traceId: string, rating: 1 | -1): Promise<void> {
-    const resp = await fetch(`${this.base}/feedback`, {
-      method: "POST",
-      headers: this.headers,
-      body: JSON.stringify({ trace_id: traceId, rating }),
-    });
+    const resp = await fetchWithRetry(
+      `${this.base}/feedback`,
+      {
+        method: "POST",
+        headers: this.headers,
+        body: JSON.stringify({ trace_id: traceId, rating }),
+      },
+      this.retryConfig,
+    );
     if (!resp.ok) {
       throw new Error(`SynapseOS error: ${resp.status}`);
     }
@@ -157,10 +256,14 @@ export class SynapseOSClient {
 
   /** Get collection stats for the tenant. */
   async collections(): Promise<Record<string, any>> {
-    const resp = await fetch(`${this.base}/collections`, {
-      method: "GET",
-      headers: this.headers,
-    });
+    const resp = await fetchWithRetry(
+      `${this.base}/collections`,
+      {
+        method: "GET",
+        headers: this.headers,
+      },
+      this.retryConfig,
+    );
     if (!resp.ok) {
       throw new Error(`SynapseOS error: ${resp.status}`);
     }

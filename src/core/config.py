@@ -40,6 +40,9 @@ OPENROUTER_API_KEY: str = _env("OPENROUTER_API_KEY", "")
 ANTHROPIC_API_KEY: str = _env("ANTHROPIC_API_KEY", "")
 ENCRYPTION_KEY: str = _env("ENCRYPTION_KEY", required=False)
 
+# ─── Admin ──────────────────────────────────────────────────────────────────────
+ADMIN_SECRET: str = _env("ADMIN_SECRET", "")  # Required for /admin/* endpoints. Empty = disabled.
+
 # ─── Collection Names ──────────────────────────────────────────────────────────
 COLLECTION_KNOWLEDGE: str = "synapse_knowledge"
 COLLECTION_MEMORY: str = "synapse_memory"

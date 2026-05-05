@@ -1,9 +1,9 @@
-"""POST /v1/ingest, POST /v1/ingest/file, GET /v1/ingest/{job_id}"""
+"""POST /v1/ingest, POST /v1/ingest/file, POST /v1/ingest/batch, POST /v1/ingest/bulk-files, GET /v1/ingest/{job_id}"""
 import time
 from uuid import uuid4
 from fastapi import APIRouter, Request, BackgroundTasks, UploadFile, File
 
-from src.api.models import IngestRequest
+from src.api.models import IngestRequest, BatchIngestRequest
 from src.core.ingestion import ingest_urls, ingest_file
 from src.core.clients import get_keydb
 
@@ -15,7 +15,7 @@ async def ingest_endpoint(body: IngestRequest, request: Request, background_task
     """Queue document ingestion from URLs.
 
     Returns a job ID immediately. Poll `GET /v1/ingest/{job_id}` for status.
-    Maximum 10 URLs per request. Each URL is scraped, chunked, deduplicated,
+    Maximum 50 URLs per request. Each URL is scraped, chunked, deduplicated,
     embedded (dense + sparse), and upserted to Qdrant.
     """
     tenant_id = request.state.tenant_id
@@ -27,6 +27,36 @@ async def ingest_endpoint(body: IngestRequest, request: Request, background_task
     })
     background_tasks.add_task(ingest_urls, body.urls, tenant_id, job_id, body.metadata)
     return {"job_id": job_id, "status": "queued", "document_count": len(body.urls)}
+
+
+@router.post("/ingest/batch", summary="Batch ingest URL groups", response_description="Job IDs for each group")
+async def ingest_batch_endpoint(body: BatchIngestRequest, request: Request, background_tasks: BackgroundTasks):
+    """Batch ingestion — submit multiple URL groups, each with its own metadata.
+
+    Each group is processed as a separate job with independent tracking.
+    Maximum 10 groups per request, 50 URLs per group.
+    Returns one job ID per group for granular progress tracking.
+    """
+    tenant_id = request.state.tenant_id
+    keydb = get_keydb()
+    jobs = []
+
+    for group in body.groups:
+        urls = group.get("urls", [])
+        metadata = group.get("metadata", {})
+
+        if not urls or len(urls) > 50:
+            continue  # Skip invalid groups silently
+
+        job_id = str(uuid4())
+        await keydb.hset(f"job:{job_id}", mapping={
+            "created_at": str(time.time()),
+            "tenant_id": tenant_id,
+        })
+        background_tasks.add_task(ingest_urls, urls, tenant_id, job_id, metadata)
+        jobs.append({"job_id": job_id, "url_count": len(urls)})
+
+    return {"status": "queued", "jobs": jobs, "total_groups": len(jobs)}
 
 
 @router.post("/ingest/file", summary="Ingest uploaded file", response_description="Job ID for tracking")
@@ -50,6 +80,38 @@ async def ingest_file_endpoint(
     })
     background_tasks.add_task(ingest_file, content, file.filename, tenant_id, job_id)
     return {"job_id": job_id, "status": "queued"}
+
+
+@router.post("/ingest/bulk-files", summary="Bulk file upload", response_description="Job IDs for each file")
+async def ingest_bulk_files_endpoint(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    files: list[UploadFile] = File(..., description="Multiple PDF, DOCX, TXT, or MD files (max 20)"),
+):
+    """Upload multiple files for ingestion (max 20 files per request).
+
+    Each file is processed as a separate job with independent tracking.
+    Returns one job ID per file for granular progress tracking.
+    Maximum 20 files per request to prevent memory exhaustion on ARM.
+    """
+    tenant_id = request.state.tenant_id
+    keydb = get_keydb()
+
+    if len(files) > 20:
+        return {"status": "error", "message": "Maximum 20 files per bulk upload"}
+
+    jobs = []
+    for file in files:
+        job_id = str(uuid4())
+        content = await file.read()
+        await keydb.hset(f"job:{job_id}", mapping={
+            "created_at": str(time.time()),
+            "tenant_id": tenant_id,
+        })
+        background_tasks.add_task(ingest_file, content, file.filename, tenant_id, job_id)
+        jobs.append({"job_id": job_id, "filename": file.filename})
+
+    return {"status": "queued", "jobs": jobs, "total_files": len(jobs)}
 
 
 @router.get("/ingest/{job_id}", summary="Check ingestion status", response_description="Job status and progress")

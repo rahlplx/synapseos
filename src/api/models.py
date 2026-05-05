@@ -40,11 +40,21 @@ class ThinkRequest(QuestionBase):
 class IngestRequest(BaseModel):
     """POST /v1/ingest — Queue document ingestion."""
     urls: list[str] = Field(
-        ..., max_length=10,
-        description="List of URLs to ingest (max 10)",
+        ..., max_length=50,
+        description="List of URLs to ingest (max 50)",
         examples=[["https://example.com/report.pdf"]],
     )
     metadata: dict = Field(default_factory=dict, description="Optional metadata to attach")
+
+
+class BatchIngestRequest(BaseModel):
+    """POST /v1/ingest/batch — Batch ingestion with multiple URL groups."""
+    groups: list[dict] = Field(
+        ...,
+        max_length=10,
+        description="List of URL groups (max 10 groups, 50 URLs each). Each group: {urls: [...], metadata: {}}",
+        examples=[[{"urls": ["https://example.com/page1", "https://example.com/page2"], "metadata": {"source": "docs"}}]],
+    )
 
 
 class FeedbackRequest(BaseModel):

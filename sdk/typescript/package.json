@@ -8,9 +8,14 @@
     "build": "tsc",
     "dev": "tsc --watch"
   },
-  "keywords": ["synapseos", "rag", "cognitive", "byok"],
+  "keywords": [
+    "synapseos",
+    "rag",
+    "cognitive",
+    "byok"
+  ],
   "license": "MIT",
   "devDependencies": {
-    "typescript": "^5.0.0"
+    "typescript": "^5.9.3"
   }
 }

@@ -11,6 +11,8 @@ from src.core.clients import get_keydb, get_cipher
 
 # Paths that don't require tenant authentication
 PUBLIC_PATHS = {"/health", "/health/detailed", "/docs", "/redoc", "/openapi.json"}
+# Admin paths use X-Admin-Secret header instead of X-Tenant-ID
+ADMIN_PATH_PREFIX = "/admin/"
 
 # Atomic incr + expire via Lua script (prevents key leak on crash)
 _LUA_INCR_EXPIRE = """
@@ -26,6 +28,14 @@ class TenantMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         # Skip auth for public paths
         if request.url.path in PUBLIC_PATHS:
+            return await call_next(request)
+
+        # Skip tenant auth for admin paths (they use X-Admin-Secret instead)
+        if request.url.path.startswith(ADMIN_PATH_PREFIX):
+            return await call_next(request)
+
+        # Skip tenant auth for WebSocket paths (WS uses query params for auth)
+        if request.url.path.startswith("/v1/ws/"):
             return await call_next(request)
 
         # ── 1. Tenant Identification ──
