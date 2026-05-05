@@ -10,7 +10,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from src.core.clients import get_keydb, get_cipher
 
 # Paths that don't require tenant authentication
-PUBLIC_PATHS = {"/health", "/docs", "/redoc", "/openapi.json"}
+PUBLIC_PATHS = {"/health", "/health/detailed", "/docs", "/redoc", "/openapi.json"}
 
 # Atomic incr + expire via Lua script (prevents key leak on crash)
 _LUA_INCR_EXPIRE = """

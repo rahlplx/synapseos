@@ -31,6 +31,9 @@ LANGFUSE_PUBLIC_KEY: str = _env("LANGFUSE_PUBLIC_KEY", "")
 LANGFUSE_SECRET_KEY: str = _env("LANGFUSE_SECRET_KEY", "")
 LANGFUSE_HOST: str = _env("LANGFUSE_HOST", "http://langfuse:3100")
 
+# ─── CORS ───────────────────────────────────────────────────────────────────────
+CORS_ORIGINS: str = _env("CORS_ORIGINS", "*")  # Comma-separated, e.g. "https://app.example.com,https://admin.example.com"
+
 # ─── API Keys ───────────────────────────────────────────────────────────────────
 GROQ_API_KEY: str = _env("GROQ_API_KEY", "")
 OPENROUTER_API_KEY: str = _env("OPENROUTER_API_KEY", "")

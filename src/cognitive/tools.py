@@ -200,7 +200,11 @@ class ToolExecutor:
         headers = {}
         if tool["auth_header"]:
             try:
-                auth = get_cipher().decrypt(tool["auth_header"]).decode()
+                raw = tool["auth_header"]
+                # Handle both TEXT (Fernet string) and BYTEA (bytes) column types
+                if isinstance(raw, str):
+                    raw = raw.encode()
+                auth = get_cipher().decrypt(raw).decode()
                 headers["Authorization"] = auth
             except Exception:
                 logger.warning(f"[security] Fernet decrypt failed for tool '{tool_name}'")

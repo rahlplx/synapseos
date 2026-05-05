@@ -9,7 +9,8 @@ from contextlib import asynccontextmanager
 
 from src.api.middleware.tenant import TenantMiddleware
 from src.api.middleware.langfuse_mw import LangfuseMiddleware
-from src.api.routes import query, think, ingest, feedback, collections
+from src.api.routes import query, think, ingest, feedback, collections, health, keys, tools, sessions
+from src.core.config import CORS_ORIGINS
 
 API_DESCRIPTION = """
 ## SynapseOS — Self-Improving BYOK RAG Platform
@@ -26,6 +27,16 @@ All `/v1/` endpoints require `X-Tenant-ID` header. Rate limited at 60 RPM per te
 
 ### Streaming
 Both endpoints support SSE streaming. Set `stream: true` in the request body.
+
+### Management APIs
+| Endpoint Group | Description |
+|----------------|-------------|
+| `/v1/keys` | BYOK API key management (register, delete, list providers) |
+| `/v1/tools` | Custom tool CRUD (register, list, get, delete HTTP endpoints) |
+| `/v1/sessions` | Session management (list, get history, clear) |
+| `/v1/interactions` | Interaction log history with pagination |
+| `/v1/collections` | Collection stats, analytics, document deletion, datasets |
+| `/health/detailed` | Readiness check with downstream service status |
 """
 
 
@@ -58,7 +69,8 @@ app = FastAPI(
 )
 
 # ── Middleware (order: last added = first executed) ──
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+_allowed_origins = [o.strip() for o in CORS_ORIGINS.split(",") if o.strip()]
+app.add_middleware(CORSMiddleware, allow_origins=_allowed_origins, allow_methods=["*"], allow_headers=["*"])
 app.add_middleware(LangfuseMiddleware)
 app.add_middleware(TenantMiddleware)
 
@@ -68,12 +80,11 @@ app.include_router(think.router, prefix="/v1")
 app.include_router(ingest.router, prefix="/v1")
 app.include_router(feedback.router, prefix="/v1")
 app.include_router(collections.router, prefix="/v1")
+app.include_router(keys.router, prefix="/v1")
+app.include_router(tools.router, prefix="/v1")
+app.include_router(sessions.router, prefix="/v1")
+
+# Health endpoints (no /v1 prefix — public paths)
+app.include_router(health.router)
 
 
-@app.get("/health", summary="Health check", tags=["system"])
-async def health():
-    """Health check endpoint. No authentication required.
-
-    Returns OK status and API version. Skipped by TenantMiddleware.
-    """
-    return {"status": "ok", "version": "1.0.0"}

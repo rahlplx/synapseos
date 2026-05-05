@@ -53,6 +53,31 @@ class FeedbackRequest(BaseModel):
     rating: int = Field(..., description="+1 (thumbs up) or -1 (thumbs down)")
 
 
+class RegisterKeyRequest(BaseModel):
+    """POST /v1/keys — Register a BYOK API key."""
+    provider: str = Field(
+        ...,
+        description="LLM provider name (e.g. 'groq', 'openrouter', 'anthropic')",
+        examples=["groq"],
+    )
+    api_key: str = Field(
+        ...,
+        min_length=8,
+        max_length=512,
+        description="API key for the provider (stored encrypted with Fernet)",
+    )
+
+
+class RegisterToolRequest(BaseModel):
+    """POST /v1/tools — Register a custom tenant tool."""
+    name: str = Field(..., min_length=1, max_length=64, description="Tool name (unique per tenant)")
+    endpoint_url: str = Field(..., description="HTTP endpoint URL for the tool")
+    method: str = Field(default="GET", description="HTTP method (GET, POST, PUT, DELETE)")
+    auth_header: str = Field(default="", description="Authorization header value (stored encrypted)")
+    description: str = Field(default="", max_length=500, description="Human-readable tool description")
+    active: bool = Field(default=True, description="Whether the tool is active")
+
+
 # ─── Standardized Error Response ───────────────────────────────────────────────
 
 class ErrorResponse(BaseModel):

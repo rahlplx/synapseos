@@ -1,4 +1,4 @@
-"""Collection management, analytics, document deletion, and dataset listing."""
+"""Collection management, analytics, document deletion, dataset listing, and interaction logs."""
 import logging
 from fastapi import APIRouter, Request, HTTPException
 from qdrant_client import models
@@ -166,3 +166,71 @@ async def list_datasets(request: Request):
         logger.warning(f"[non-critical] list_datasets failed: {type(e).__name__}: {e}")
 
     return {"datasets": datasets}
+
+
+@router.get(
+    "/interactions",
+    summary="List interaction logs",
+    response_description="Paginated interaction history",
+)
+async def list_interactions(
+    request: Request,
+    limit: int = 20,
+    offset: int = 0,
+):
+    """List interaction logs for this tenant with pagination.
+
+    Returns query, answer, RAGAS scores, and timestamps for each interaction.
+    Use `limit` and `offset` for pagination. Maximum limit is 100.
+    Results are ordered by most recent first.
+    """
+    tenant_id = request.state.tenant_id
+    from src.core.db import get_pool
+
+    limit = min(limit, 100)  # Cap at 100 to prevent memory issues
+    offset = max(offset, 0)
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        # Get total count for pagination metadata
+        total = await conn.fetchval(
+            "SELECT COUNT(*) FROM interaction_logs WHERE tenant_id = $1",
+            tenant_id,
+        )
+
+        rows = await conn.fetch(
+            """
+            SELECT id, query, answer, contexts, created_at,
+                   ragas_faithfulness, ragas_relevancy, ragas_combined
+            FROM interaction_logs
+            WHERE tenant_id = $1
+            ORDER BY created_at DESC
+            LIMIT $2 OFFSET $3
+            """,
+            tenant_id, limit, offset,
+        )
+
+    interactions = [
+        {
+            "id": str(r["id"]),
+            "query": r["query"],
+            "answer": r["answer"][:500] if r["answer"] else None,  # Truncate long answers
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            "ragas": {
+                "faithfulness": round(float(r["ragas_faithfulness"]), 3) if r["ragas_faithfulness"] else None,
+                "relevancy": round(float(r["ragas_relevancy"]), 3) if r["ragas_relevancy"] else None,
+                "combined": round(float(r["ragas_combined"]), 3) if r["ragas_combined"] else None,
+            },
+        }
+        for r in rows
+    ]
+
+    return {
+        "interactions": interactions,
+        "pagination": {
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "has_more": (offset + limit) < total,
+        },
+    }
