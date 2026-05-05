@@ -4,16 +4,14 @@ from uuid import uuid4
 from fastapi import APIRouter, Request, BackgroundTasks, UploadFile, File
 from pydantic import BaseModel, Field
 from src.core.ingestion import ingest_urls, ingest_file
-import redis.asyncio as redis
-import os
+from src.core.clients import get_keydb
 
 router = APIRouter()
-keydb = redis.from_url(os.environ.get("KEYDB_URL", "redis://keydb:6379"))
 
 
 class IngestRequest(BaseModel):
     urls: list[str] = Field(..., max_length=10, description="List of URLs to ingest (max 10)")
-    metadata: dict = {}
+    metadata: dict = Field(default_factory=dict)
 
 
 @router.post("/ingest")
@@ -21,7 +19,7 @@ async def ingest_endpoint(body: IngestRequest, request: Request, background_task
     """Queue document ingestion. Returns job ID immediately."""
     tenant_id = request.state.tenant_id
     job_id = str(uuid4())
-    # Record job creation timestamp and tenant_id for ownership verification
+    keydb = get_keydb()
     await keydb.hset(f"job:{job_id}", mapping={
         "created_at": str(time.time()),
         "tenant_id": tenant_id,
@@ -40,7 +38,7 @@ async def ingest_file_endpoint(
     tenant_id = request.state.tenant_id
     job_id = str(uuid4())
     content = await file.read()
-    # Record job creation timestamp and tenant_id for ownership verification
+    keydb = get_keydb()
     await keydb.hset(f"job:{job_id}", mapping={
         "created_at": str(time.time()),
         "tenant_id": tenant_id,
@@ -51,10 +49,9 @@ async def ingest_file_endpoint(
 
 @router.get("/ingest/{job_id}")
 async def ingest_status(job_id: str, request: Request):
-    """Poll ingestion job status. Returns elapsed_ms since job creation.
-    Verifies tenant ownership of the job to prevent cross-tenant access.
-    """
+    """Poll ingestion job status. Verifies tenant ownership."""
     tenant_id = request.state.tenant_id
+    keydb = get_keydb()
     data = await keydb.hgetall(f"job:{job_id}")
     if not data:
         return {"job_id": job_id, "status": "not_found"}
@@ -64,7 +61,6 @@ async def ingest_status(job_id: str, request: Request):
     if job_tenant and job_tenant != tenant_id:
         return {"job_id": job_id, "status": "not_found"}
 
-    # Compute elapsed time from KeyDB TTL-based creation timestamp
     created_at = float(data.get(b"created_at", 0))
     elapsed_ms = int((time.time() - created_at) * 1000) if created_at else None
 

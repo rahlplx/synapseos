@@ -1,11 +1,12 @@
 """GET /v1/collections, GET /v1/analytics, DELETE /v1/documents/{doc_id}, GET /v1/datasets"""
 import logging
 from fastapi import APIRouter, Request, HTTPException
-from qdrant_client import AsyncQdrantClient, models
-import os
+from qdrant_client import models
+
+from src.core.clients import get_qdrant, get_minio
+from src.core.config import COLLECTION_KNOWLEDGE, COLLECTION_MEMORY, MINIO_DATASET_BUCKET
 
 router = APIRouter()
-qdrant = AsyncQdrantClient(url=os.environ.get("QDRANT_URL", "http://qdrant:6333"))
 logger = logging.getLogger(__name__)
 
 
@@ -13,15 +14,14 @@ logger = logging.getLogger(__name__)
 async def get_collections(request: Request):
     """List document collection stats for the tenant.
     Returns TENANT-SCOPED vector counts (not global counts).
-    Uses Qdrant count with tenant_id filter to prevent cross-tenant data leakage.
     """
     tenant_id = request.state.tenant_id
+    qdrant = get_qdrant()
     result = {"tenant_id": tenant_id, "collections": {}}
 
-    for name in ("synapse_knowledge", "synapse_memory"):
+    for name in (COLLECTION_KNOWLEDGE, COLLECTION_MEMORY):
         try:
             info = await qdrant.get_collection(name)
-            # Count only this tenant's vectors — prevents cross-tenant data leakage
             tenant_count = await qdrant.count(
                 name,
                 count_filter=models.Filter(
@@ -29,22 +29,18 @@ async def get_collections(request: Request):
                         key="tenant_id", match=models.MatchValue(value=tenant_id)
                     )]
                 ),
-                exact=False,  # Approximate count for speed
+                exact=False,
             )
             result["collections"][name] = {
                 "vector_count": tenant_count.count if tenant_count else 0,
-                "total_collection_size": info.points_count or 0,  # Global size for debugging
+                "total_collection_size": info.points_count or 0,
                 "status": info.status,
             }
         except Exception as e:
             logger.warning(f"[non-critical] get_collections failed for '{name}': {type(e).__name__}: {e}")
-            result["collections"][name] = {
-                "vector_count": 0,
-                "status": "not_found",
-            }
+            result["collections"][name] = {"vector_count": 0, "status": "not_found"}
 
     return result
- 58efb67 (fix: resolve all 8 critical weaknesses + 6 architectural security improvements)
 
 
 @router.get("/analytics")
@@ -87,6 +83,7 @@ async def get_analytics(request: Request):
 async def delete_document(document_id: str, request: Request):
     """Remove a document from PostgreSQL and all its vectors from Qdrant."""
     tenant_id = request.state.tenant_id
+    qdrant = get_qdrant()
     from src.core.db import get_pool
 
     pool = await get_pool()
@@ -97,53 +94,33 @@ async def delete_document(document_id: str, request: Request):
         )
         if not doc:
             raise HTTPException(404, "Document not found")
-
-        # Delete document row from PostgreSQL
         await conn.execute(
             "DELETE FROM documents WHERE id=$1::uuid AND tenant_id=$2",
             document_id, tenant_id,
         )
 
-    # Delete vectors by source_url filter — MUST include tenant_id to prevent
-    # cross-tenant data deletion when two tenants have documents with the same URL
+    # Delete vectors — MUST include tenant_id to prevent cross-tenant deletion
     source_url = doc["source_url"]
     if source_url:
         await qdrant.delete(
-            collection_name="synapse_knowledge",
+            collection_name=COLLECTION_KNOWLEDGE,
             points_selector=models.FilterSelector(
-                filter=models.Filter(
-                    must=[
-                        models.FieldCondition(
-                            key="source_url",
-                            match=models.MatchValue(value=source_url),
-                        ),
-                        models.FieldCondition(
-                            key="tenant_id",
-                            match=models.MatchValue(value=tenant_id),
-                        ),
-                    ]
-                )
+                filter=models.Filter(must=[
+                    models.FieldCondition(key="source_url", match=models.MatchValue(value=source_url)),
+                    models.FieldCondition(key="tenant_id", match=models.MatchValue(value=tenant_id)),
+                ])
             ),
         )
 
-    # Also delete by source_filename if no URL (file uploads)
     source_filename = doc["source_filename"]
     if source_filename and not source_url:
         await qdrant.delete(
-            collection_name="synapse_knowledge",
+            collection_name=COLLECTION_KNOWLEDGE,
             points_selector=models.FilterSelector(
-                filter=models.Filter(
-                    must=[
-                        models.FieldCondition(
-                            key="source_filename",
-                            match=models.MatchValue(value=source_filename),
-                        ),
-                        models.FieldCondition(
-                            key="tenant_id",
-                            match=models.MatchValue(value=tenant_id),
-                        ),
-                    ]
-                )
+                filter=models.Filter(must=[
+                    models.FieldCondition(key="source_filename", match=models.MatchValue(value=source_filename)),
+                    models.FieldCondition(key="tenant_id", match=models.MatchValue(value=tenant_id)),
+                ])
             ),
         )
 
@@ -153,18 +130,10 @@ async def delete_document(document_id: str, request: Request):
 @router.get("/datasets")
 async def list_datasets(request: Request):
     """List exported fine-tuning datasets in MinIO."""
-    import boto3
-
-    minio = boto3.client(
-        "s3",
-        endpoint_url=f"http://{os.environ.get('MINIO_ENDPOINT', 'minio:9000')}",
-        aws_access_key_id=os.environ.get("MINIO_ACCESS_KEY"),
-        aws_secret_access_key=os.environ.get("MINIO_SECRET_KEY"),
-    )
-
+    minio = get_minio()
     datasets = []
     try:
-        response = minio.list_objects_v2(Bucket="synapseos", Prefix="datasets/")
+        response = minio.list_objects_v2(Bucket=MINIO_DATASET_BUCKET, Prefix="datasets/")
         for obj in response.get("Contents", []):
             datasets.append({
                 "key": obj["Key"],

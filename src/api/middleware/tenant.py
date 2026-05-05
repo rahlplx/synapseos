@@ -6,15 +6,20 @@ Public paths (/health, /docs) are skipped entirely.
 import time
 from fastapi import Request, HTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
-from cryptography.fernet import Fernet
-import redis.asyncio as redis
-import os
 
-keydb = redis.from_url(os.environ.get("KEYDB_URL", "redis://keydb:6379"))
-cipher = Fernet(os.environ["ENCRYPTION_KEY"].encode())
+from src.core.clients import get_keydb, get_cipher
 
 # Paths that don't require tenant authentication
 PUBLIC_PATHS = {"/health", "/docs", "/redoc", "/openapi.json"}
+
+# Atomic incr + expire via Lua script (prevents key leak on crash)
+_LUA_INCR_EXPIRE = """
+local count = redis.call('INCR', KEYS[1])
+if count == 1 then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return count
+"""
 
 
 class TenantMiddleware(BaseHTTPMiddleware):
@@ -29,39 +34,27 @@ class TenantMiddleware(BaseHTTPMiddleware):
             raise HTTPException(401, "Missing X-Tenant-ID header")
 
         # ── 2. Rate Limiting — sliding window BEFORE any ONNX work ──
-        # This prevents CPU starvation from unauthenticated/over-limit requests
-        # Uses Lua script for atomic incr+expire (prevents race condition on crash)
+        keydb = get_keydb()
         window = int(time.time() // 60)
         limit_key = f"rate:{tenant_id}:{window}"
+        count = await keydb.eval(_LUA_INCR_EXPIRE, 1, limit_key, 60)
 
-        # Atomic incr + expire via Lua script (prevents key leak on crash between incr and expire)
-        lua_incr_expire = """
-        local count = redis.call('INCR', KEYS[1])
-        if count == 1 then
-            redis.call('EXPIRE', KEYS[1], ARGV[1])
-        end
-        return count
-        """
-        count = await keydb.eval(lua_incr_expire, 1, limit_key, 60)
-
-        # Check tenant-specific RPM limit (default: 60 RPM)
         rpm_limit = int(await keydb.get(f"tenant:{tenant_id}:rpm") or 60)
         if count > rpm_limit:
             raise HTTPException(429, f"Rate limit exceeded ({rpm_limit} RPM)")
 
         # ── 3. BYOK Key Injection ──
-        # Check KeyDB first (fast), then fall back to platform default
         encrypted = await keydb.get(f"tenant:{tenant_id}:api_key")
         if encrypted:
             try:
-                request.state.litellm_api_key = cipher.decrypt(encrypted).decode()
-            except Exception as e:
-                # Corrupted encryption — log and fall back to platform key
+                request.state.litellem_api_key = get_cipher().decrypt(encrypted).decode()
+            except Exception:
                 import logging
-                logging.getLogger(__name__).warning(f"[security] BYOK Fernet decrypt failed for tenant={tenant_id}: {type(e).__name__}")
+                logging.getLogger(__name__).warning(
+                    f"[security] BYOK Fernet decrypt failed for tenant={tenant_id}"
+                )
                 request.state.litellm_api_key = None
         else:
-            # No BYOK key configured — use platform default (Groq free tier)
             request.state.litellm_api_key = None
 
         # Attach tenant_id for downstream routes

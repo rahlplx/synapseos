@@ -5,120 +5,56 @@ ARM: Docling concurrency=1, batch_size=64 ingestion, OMP_NUM_THREADS=4
 Security: Prompt injection sanitisation strips known injection patterns before embedding.
 """
 import os
-os.environ.setdefault("OMP_NUM_THREADS", "4")          # ARM CPU tuning — MUST be before fastembed
-os.environ.setdefault("DOCLING_CPU_ONLY", "1")         # ARM: force Docling CPU-only mode
-
 import asyncio
 import hashlib
+import io
+import re as _re
 import tempfile
 from uuid import uuid4
 from datetime import datetime, timezone
 from typing import Optional
 
 from fastembed import TextEmbedding, SparseTextEmbedding
-from qdrant_client import AsyncQdrantClient, models
+from qdrant_client import models
 from crawl4ai import AsyncWebCrawler, CrawlerRunConfig, CacheMode
 from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
 from crawl4ai.content_filter_strategy import PruningContentFilter
-import redis.asyncio as redis
-import asyncpg
-import boto3
-from botocore.client import Config
 
-# ─── Clients ──────────────────────────────────────────────────────────────────
-QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
-KEYDB_URL = os.environ.get("KEYDB_URL", "redis://keydb:6379")
-DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql+asyncpg://synapse:changeme@postgres:5432/synapseos")
-MINIO_ENDPOINT = os.environ.get("MINIO_ENDPOINT", "minio:9000")
-MINIO_ACCESS_KEY = os.environ.get("MINIO_ACCESS_KEY", "synapseos")
-MINIO_SECRET_KEY = os.environ.get("MINIO_SECRET_KEY", "changeme")
-COLLECTION = "synapse_knowledge"
+from src.core.config import (
+    INGEST_BATCH_SIZE, SCROLL_DELAY, COLLECTION_KNOWLEDGE,
+    MINIO_RAW_BUCKET, MINIO_PARSED_BUCKET, RELEVANCE_GATE,
+)
+from src.core.clients import get_qdrant, get_keydb, get_minio
+from src.core.db import get_pool
 
-qdrant = AsyncQdrantClient(url=QDRANT_URL)
-keydb = redis.from_url(KEYDB_URL)
+import logging
+logger = logging.getLogger(__name__)
 
-# ─── MinIO Client (lazy) ─────────────────────────────────────────────────────
-_minio_client = None
-MINIO_RAW_BUCKET = "synapse-raw"
-MINIO_PARSED_BUCKET = "synapse-parsed"
-
-
-def _get_minio():
-    """Lazy-initialize MinIO client and ensure buckets exist."""
-    global _minio_client
-    if _minio_client is None:
-        from minio import Minio
-        _minio_client = Minio(
-            MINIO_ENDPOINT,
-            access_key=MINIO_ACCESS_KEY,
-            secret_key=MINIO_SECRET_KEY,
-            secure=False,  # Internal Docker network — no TLS
-        )
-        # Ensure buckets exist
-        for bucket in (MINIO_RAW_BUCKET, MINIO_PARSED_BUCKET):
-            if not _minio_client.bucket_exists(bucket):
-                _minio_client.make_bucket(bucket)
-    return _minio_client
-
-
-# ─── PostgreSQL pool (delegated to shared pool) ───────────────────────────────
-
-
-async def _get_pg():
-    """Get the shared asyncpg connection pool."""
-    from src.core.db import get_pool
-    return await get_pool()
-
-
-# ─── Models (lazy_load=True — only allocate RAM on first embed call) ──────────
+# ─── Models (shared with retrieval.py, lazy_load=True) ─────────────────────────
 dense_model = TextEmbedding("BAAI/bge-base-en-v1.5", threads=4, lazy_load=True)
 sparse_model = SparseTextEmbedding("Qdrant/bm25", threads=4)
 
-# ─── ARM Constants ────────────────────────────────────────────────────────────
-INGEST_BATCH_SIZE = 64   # batch_size=64 for ingestion (architecture doc)
-SCROLL_DELAY = 1.5       # Crawl4AI scroll delay for full page render
 
+# ─── MinIO Upload (unified) ────────────────────────────────────────────────────
 
-# ─── MinIO Helpers ────────────────────────────────────────────────────────────
-
-async def store_raw_to_minio(content: bytes, object_key: str) -> str:
-    """Store raw content bytes in MinIO. Returns the object key.
+async def upload_to_minio(bucket: str, content: bytes | str, object_key: str, content_type: str = "application/octet-stream") -> str:
+    """Upload content to MinIO. Accepts bytes or str (auto-encoded to UTF-8).
     Uses asyncio.to_thread to avoid blocking the event loop.
+    Returns the object key.
     """
-    client = _get_minio()
-    import io
+    client = get_minio()
+    if isinstance(content, str):
+        content = content.encode("utf-8")
+        content_type = content_type or "text/markdown"
     data_stream = io.BytesIO(content)
     await asyncio.to_thread(
-        client.put_object,
-        MINIO_RAW_BUCKET,
-        object_key,
-        data_stream,
-        len(content),
-        content_type="application/octet-stream",
+        client.put_object, bucket, object_key, data_stream, len(content),
+        content_type=content_type,
     )
     return object_key
 
 
-async def store_parsed_to_minio(markdown: str, object_key: str) -> str:
-    """Store parsed markdown in MinIO. Returns the object key.
-    Uses asyncio.to_thread to avoid blocking the event loop.
-    """
-    client = _get_minio()
-    import io
-    content_bytes = markdown.encode("utf-8")
-    data_stream = io.BytesIO(content_bytes)
-    await asyncio.to_thread(
-        client.put_object,
-        MINIO_PARSED_BUCKET,
-        object_key,
-        data_stream,
-        len(content_bytes),
-        content_type="text/markdown",
-    )
-    return object_key
-
-
-# ─── PostgreSQL Helpers ───────────────────────────────────────────────────────
+# ─── PostgreSQL Helpers (delegated to shared pool) ─────────────────────────────
 
 async def upsert_document_record(
     tenant_id: str,
@@ -129,32 +65,24 @@ async def upsert_document_record(
     chunk_count: int,
     status: str,
 ) -> str:
-    """Insert or update a document record in PostgreSQL.
-    Returns the document UUID.
-    """
+    """Insert a document record in PostgreSQL. Returns the document UUID."""
     doc_id = str(uuid4())
-    pool = await _get_pg()
+    pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
             """
             INSERT INTO documents (id, tenant_id, source_url, minio_raw_path, minio_parsed_path, chunk_count, status, created_at)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             """,
-            doc_id,
-            tenant_id,
-            source_url,
-            minio_raw_path,
-            minio_parsed_path,
-            chunk_count,
-            status,
-            datetime.now(timezone.utc),
+            doc_id, tenant_id, source_url, minio_raw_path, minio_parsed_path,
+            chunk_count, status, datetime.now(timezone.utc),
         )
     return doc_id
 
 
 async def update_document_status(doc_id: str, status: str, chunk_count: int = None):
     """Update document status and optionally chunk count in PostgreSQL."""
-    pool = await _get_pg()
+    pool = await get_pool()
     async with pool.acquire() as conn:
         if chunk_count is not None:
             await conn.execute(
@@ -168,28 +96,18 @@ async def update_document_status(doc_id: str, status: str, chunk_count: int = No
             )
 
 
-async def log_interaction(
-    tenant_id: str,
-    event_type: str,
-    detail: dict,
-):
-    """Write an interaction log to PostgreSQL after ingestion events.
-    Records ingestion metadata for audit, analytics, and self-improvement loop.
-    """
+async def log_interaction(tenant_id: str, event_type: str, detail: dict):
+    """Write an interaction log to PostgreSQL after ingestion events."""
     import json
-    pool = await _get_pg()
+    pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
             """
             INSERT INTO interaction_logs (id, tenant_id, query, answer, contexts, created_at)
             VALUES ($1, $2, $3, $4, $5, $6)
             """,
-            str(uuid4()),
-            tenant_id,
-            f"[ingestion:{event_type}]",
-            json.dumps(detail),
-            json.dumps([]),
-            datetime.now(timezone.utc),
+            str(uuid4()), tenant_id, f"[ingestion:{event_type}]",
+                json.dumps(detail), json.dumps([]), datetime.now(timezone.utc),
         )
 
 
@@ -199,7 +117,7 @@ async def close_ingestion_clients():
     await close_pool()
 
 
-# ─── Core Pipeline ────────────────────────────────────────────────────────────
+# ─── Core Pipeline ─────────────────────────────────────────────────────────────
 
 async def scrape_url(url: str) -> str:
     """Scrape a URL using Crawl4AI with JS rendering and pruning content filter.
@@ -211,7 +129,7 @@ async def scrape_url(url: str) -> str:
     config = CrawlerRunConfig(
         cache_mode=CacheMode.BYPASS,
         markdown_generator=md_gen,
-        page_timeout=30000,       # 30s hard timeout — prevents DOM hang
+        page_timeout=30000,
         scan_full_page=True,
         scroll_delay=SCROLL_DELAY,
     )
@@ -225,7 +143,7 @@ async def scrape_url(url: str) -> str:
 def parse_document(file_bytes: bytes, filename: str) -> str:
     """Parse a PDF/DOCX file using Docling (layout-aware → markdown).
     ARM gotcha: Docling peaks at ~3.5GB RAM per 100-page PDF.
-    Queue concurrency MUST be 1. DOCLING_CPU_ONLY=1 enforced above.
+    Queue concurrency MUST be 1.
     """
     from docling.document_converter import DocumentConverter
 
@@ -245,32 +163,18 @@ def parse_document(file_bytes: bytes, filename: str) -> str:
 
 
 def semantic_chunk(text: str, max_tokens: int = 512, overlap: int = 64) -> list[str]:
-    """Split text into semantic chunks using the semchunk library.
-    chunk_size=512 tokens, overlap=64 tokens (architecture doc).
-    Uses tiktoken for accurate token counting (cl100k_base = GPT-4 tokenizer).
-    """
+    """Split text into semantic chunks using semchunk + tiktoken (cl100k_base)."""
     from semchunk import chunk
     import tiktoken
 
     enc = tiktoken.get_encoding("cl100k_base")
-
-    def token_counter(t: str) -> int:
-        return len(enc.encode(t))
-
-    chunks = chunk(
-        text,
-        chunk_size=max_tokens,
-        token_counter=token_counter,
-    )
+    chunks = chunk(text, chunk_size=max_tokens, token_counter=lambda t: len(enc.encode(t)))
     if not chunks:
         raise ValueError("Semantic chunking produced zero chunks — input may be too short")
     return chunks
 
 
 # ─── Prompt Injection Sanitiser ────────────────────────────────────────────────
-# OWASP LLM Top 10: Prompt injection through ingested content is a critical risk
-# for multi-tenant RAG systems. Any tenant can ingest any URL — malicious content
-# in scraped pages becomes an injection vector when retrieved into LLM context.
 
 INJECTION_PATTERNS = [
     r"ignore\s+(previous|all|above|prior)\s+instructions?",
@@ -286,55 +190,29 @@ INJECTION_PATTERNS = [
     r"developer\s+mode",
 ]
 
-import re as _re
 _injection_regex = _re.compile("|".join(INJECTION_PATTERNS), _re.IGNORECASE)
-
-_SANITIZE_LOG = None
-
-
-def _get_sanitize_logger():
-    """Lazy logger to avoid import-time issues."""
-    global _SANITIZE_LOG
-    if _SANITIZE_LOG is None:
-        import logging
-        _SANITIZE_LOG = logging.getLogger(__name__)
-    return _SANITIZE_LOG
 
 
 def sanitise_chunk(text: str, tenant_id: str = "") -> str | None:
     """Sanitise a chunk for prompt injection patterns.
-
-    Returns None if the chunk contains a likely injection attempt —
-    such chunks should be SKIPPED (not embedded).
-
-    Returns cleaned text with HTML artifacts stripped if the chunk
-    passes the injection check.
-
-    This prevents the OWASP LLM Top 10 vulnerability where malicious
-    content scraped from URLs manipulates the LLM when retrieved.
+    Returns None if the chunk contains a likely injection attempt (skip embedding).
+    Returns cleaned text with HTML artifacts stripped if it passes.
     """
-    lower = text.lower()
-
-    # Check for injection patterns
-    if _injection_regex.search(lower):
-        _get_sanitize_logger().warning(
-            f"[security] Prompt injection attempt blocked for tenant={tenant_id}: "
-            f"{text[:100]}..."
+    if _injection_regex.search(text.lower()):
+        logger.warning(
+            f"[security] Prompt injection blocked for tenant={tenant_id}: {text[:100]}..."
         )
         return None
 
-    # Strip HTML artifacts that might bypass the markdown parser
+    # Strip HTML artifacts
     text = _re.sub(r'<script[^>]*>.*?</script>', '', text, flags=_re.DOTALL | _re.IGNORECASE)
-    text = _re.sub(r'<[^>]+>', '', text)  # Remove remaining HTML tags
-    text = text.strip()
-
-    return text if text else None
+    text = _re.sub(r'<[^>]+>', '', text)
+    return text.strip() or None
 
 
 async def dedup_chunks(chunks: list[str], tenant_id: str) -> list[str]:
-    """SHA-256 dedup — check KeyDB set per tenant.
-    Prevents re-ingesting identical chunks on repeated scrapes.
-    """
+    """SHA-256 dedup — check KeyDB set per tenant."""
+    keydb = get_keydb()
     unique = []
     for chunk in chunks:
         h = hashlib.sha256(chunk.encode()).hexdigest()
@@ -347,28 +225,20 @@ async def dedup_chunks(chunks: list[str], tenant_id: str) -> list[str]:
 async def embed_and_upsert(chunks: list[str], tenant_id: str, metadata: dict):
     """Generate dual vectors (dense 768d + sparse BM25) and upsert to Qdrant.
     batch_size=64 for ingestion per ARM rules.
-    Sparse vectors use models.SparseVector(indices=..., values=...) for
-    compatibility with newer qdrant-client API versions.
     Chunks are sanitised for prompt injection before embedding.
     """
     if not chunks:
         return
 
     # Sanitise chunks — skip any that contain prompt injection attempts
-    clean_chunks = []
-    for c in chunks:
-        result = sanitise_chunk(c, tenant_id)
-        if result is not None:
-            clean_chunks.append(result)
-        # else: injection attempt blocked and logged — skip embedding
+    clean_chunks = [c for c in chunks if sanitise_chunk(c, tenant_id) is not None]
 
     if not clean_chunks:
-        _get_sanitize_logger().warning(
-            f"[security] All chunks for tenant={tenant_id} blocked by sanitiser"
-        )
+        logger.warning(f"[security] All chunks for tenant={tenant_id} blocked by sanitiser")
         return
 
     chunks = clean_chunks
+    qdrant = get_qdrant()
 
     dense_vecs = list(dense_model.embed(chunks, batch_size=INGEST_BATCH_SIZE))
     sparse_vecs = list(sparse_model.embed(chunks, batch_size=INGEST_BATCH_SIZE))
@@ -387,39 +257,10 @@ async def embed_and_upsert(chunks: list[str], tenant_id: str, metadata: dict):
         )
         for i in range(len(chunks))
     ]
-    await qdrant.upsert(collection_name=COLLECTION, points=points)
+    await qdrant.upsert(collection_name=COLLECTION_KNOWLEDGE, points=points)
 
 
-
-async def archive_to_minio(tenant_id: str, doc_id: str, raw_content: str, parsed_md: str):
-    """Archive raw + parsed content to MinIO. Fire-and-forget safe."""
-    try:
-        minio = boto3.client(
-            "s3",
-            endpoint_url=f"http://{os.environ.get('MINIO_ENDPOINT', 'minio:9000')}",
-            aws_access_key_id=os.environ.get("MINIO_USER", "synapseos"),
-            aws_secret_access_key=os.environ.get("MINIO_PASSWORD", ""),
-            config=Config(signature_version="s3v4"),
-        )
-        bucket = "synapseos"
-        # Raw
-        minio.put_object(
-            Bucket=bucket,
-            Key=f"{tenant_id}/raw/{doc_id}.txt",
-            Body=raw_content.encode(),
-            ContentType="text/plain",
-        )
-        # Parsed markdown
-        minio.put_object(
-            Bucket=bucket,
-            Key=f"{tenant_id}/parsed/{doc_id}.md",
-            Body=parsed_md.encode(),
-            ContentType="text/markdown",
-        )
-    except Exception as e:
-        import logging
-        logging.getLogger(__name__).warning(f"[non-critical] archive_to_minio failed: {type(e).__name__}: {e}")
-        # MinIO failure must never block ingestion
+# ─── Ingestion Entry Points ────────────────────────────────────────────────────
 
 async def ingest_urls(
     urls: list[str],
@@ -428,10 +269,9 @@ async def ingest_urls(
     metadata: Optional[dict] = None,
 ):
     """Ingest a list of URLs: scrape → chunk → dedup → embed → upsert.
-    Stores raw content in MinIO, writes document records to PostgreSQL,
-    and logs ingestion events to interaction_logs.
-    Updates job status in KeyDB for polling.
+    Stores raw content in MinIO, writes document records to PostgreSQL.
     """
+    keydb = get_keydb()
     metadata = metadata or {}
     await keydb.hset(f"job:{job_id}", mapping={"status": "processing", "total": len(urls), "done": 0})
 
@@ -444,51 +284,39 @@ async def ingest_urls(
             await keydb.hset(f"job:{job_id}", "current_url", url)
             markdown = await scrape_url(url)
 
-            # 2. Store raw content in MinIO
-            raw_key = f"{tenant_id}/urls/{job_id}/{hashlib.sha256(url.encode()).hexdigest()[:16]}.md"
-            await store_raw_to_minio(markdown.encode("utf-8"), raw_key)
+            # 2. Store in MinIO
+            url_hash = hashlib.sha256(url.encode()).hexdigest()[:16]
+            raw_key = f"{tenant_id}/urls/{job_id}/{url_hash}.md"
+            parsed_key = f"{tenant_id}/parsed/{job_id}/{url_hash}.md"
+            await upload_to_minio(MINIO_RAW_BUCKET, markdown, raw_key)
+            await upload_to_minio(MINIO_PARSED_BUCKET, markdown, parsed_key, "text/markdown")
 
-            # 3. Store parsed markdown in MinIO
-            parsed_key = f"{tenant_id}/parsed/{job_id}/{hashlib.sha256(url.encode()).hexdigest()[:16]}.md"
-            await store_parsed_to_minio(markdown, parsed_key)
-
-            # 4. Create PostgreSQL document record
+            # 3. PostgreSQL document record
             doc_id = await upsert_document_record(
-                tenant_id=tenant_id,
-                source_url=url,
-                source_filename=None,
+                tenant_id=tenant_id, source_url=url, source_filename=None,
                 minio_raw_path=f"{MINIO_RAW_BUCKET}/{raw_key}",
                 minio_parsed_path=f"{MINIO_PARSED_BUCKET}/{parsed_key}",
-                chunk_count=0,
-                status="processing",
+                chunk_count=0, status="processing",
             )
 
-            # 5. Chunk
+            # 4-5. Chunk + Dedup
             chunks = semantic_chunk(markdown)
-
-            # 6. Dedup
             unique = await dedup_chunks(chunks, tenant_id)
 
-            # 7. Embed + Upsert
+            # 6. Embed + Upsert
             await embed_and_upsert(unique, tenant_id, {**metadata, "source_url": url})
 
-            # 8. Update PostgreSQL document record with final chunk count
+            # 7. Update PostgreSQL
             await update_document_status(doc_id, "done", chunk_count=len(unique))
 
-            # 9. Extract entities for graph queries (fire-and-forget)
-            asyncio.create_task(_extract_and_store_entities(markdown, tenant_id, doc_id))
+            # 8. Entity extraction (fire-and-forget)
+            _fire_and_forget(_extract_and_store_entities(markdown, tenant_id, doc_id))
 
-            # 10. Log ingestion event to interaction_logs
+            # 9. Log ingestion event
             await log_interaction(
-                tenant_id=tenant_id,
-                event_type="url_ingest",
-                detail={
-                    "job_id": job_id,
-                    "url": url,
-                    "doc_id": doc_id,
-                    "chunk_count": len(unique),
-                    "minio_raw_path": f"{MINIO_RAW_BUCKET}/{raw_key}",
-                },
+                tenant_id=tenant_id, event_type="url_ingest",
+                detail={"job_id": job_id, "url": url, "doc_id": doc_id,
+                         "chunk_count": len(unique), "minio_raw_path": f"{MINIO_RAW_BUCKET}/{raw_key}"},
             )
 
             total_chunks += len(unique)
@@ -502,7 +330,6 @@ async def ingest_urls(
             await keydb.hset(f"job:{job_id}", f"error:{url}", str(e)[:500])
 
     await keydb.hset(f"job:{job_id}", mapping={"status": "done", "chunk_count": total_chunks})
-    # Set job TTL to 24 hours so it auto-cleans
     await keydb.expire(f"job:{job_id}", 86400)
 
 
@@ -512,95 +339,86 @@ async def ingest_file(
     tenant_id: str,
     job_id: str,
 ):
-    """Ingest an uploaded file: parse → chunk → dedup → embed → upsert.
-    Stores raw file in MinIO, writes document record to PostgreSQL,
-    and logs ingestion event to interaction_logs.
-    Docling concurrency=1 enforced at worker level. DOCLING_CPU_ONLY=1 set above.
-    """
+    """Ingest an uploaded file: parse → chunk → dedup → embed → upsert."""
+    keydb = get_keydb()
     doc_id = None
     await keydb.hset(f"job:{job_id}", "status", "processing")
     try:
         # 1. Store raw file in MinIO
         raw_key = f"{tenant_id}/files/{job_id}/{filename}"
-        await store_raw_to_minio(file_bytes, raw_key)
+        await upload_to_minio(MINIO_RAW_BUCKET, file_bytes, raw_key)
 
         # 2. Parse document
         markdown = parse_document(file_bytes, filename)
 
         # 3. Store parsed markdown in MinIO
         parsed_key = f"{tenant_id}/parsed/{job_id}/{filename}.md"
-        await store_parsed_to_minio(markdown, parsed_key)
+        await upload_to_minio(MINIO_PARSED_BUCKET, markdown, parsed_key, "text/markdown")
 
-        # 4. Create PostgreSQL document record
+        # 4. PostgreSQL document record
         doc_id = await upsert_document_record(
-            tenant_id=tenant_id,
-            source_url=None,
-            source_filename=filename,
+            tenant_id=tenant_id, source_url=None, source_filename=filename,
             minio_raw_path=f"{MINIO_RAW_BUCKET}/{raw_key}",
             minio_parsed_path=f"{MINIO_PARSED_BUCKET}/{parsed_key}",
-            chunk_count=0,
-            status="processing",
+            chunk_count=0, status="processing",
         )
 
-        # 5. Chunk
+        # 5-6. Chunk + Dedup
         chunks = semantic_chunk(markdown)
-
-        # 6. Dedup
         unique = await dedup_chunks(chunks, tenant_id)
 
         # 7. Embed + Upsert
         await embed_and_upsert(unique, tenant_id, {"source_filename": filename})
 
-        # 8. Update PostgreSQL document record with final chunk count
+        # 8. Update PostgreSQL
         await update_document_status(doc_id, "done", chunk_count=len(unique))
 
-        # 9. Extract entities for graph queries (fire-and-forget)
-        asyncio.create_task(_extract_and_store_entities(markdown, tenant_id, doc_id))
+        # 9. Entity extraction (fire-and-forget)
+        _fire_and_forget(_extract_and_store_entities(markdown, tenant_id, doc_id))
 
-        # 10. Log ingestion event to interaction_logs
+        # 10. Log ingestion event
         await log_interaction(
-            tenant_id=tenant_id,
-            event_type="file_ingest",
-            detail={
-                "job_id": job_id,
-                "filename": filename,
-                "doc_id": doc_id,
-                "chunk_count": len(unique),
-                "minio_raw_path": f"{MINIO_RAW_BUCKET}/{raw_key}",
-            },
+            tenant_id=tenant_id, event_type="file_ingest",
+            detail={"job_id": job_id, "filename": filename, "doc_id": doc_id,
+                     "chunk_count": len(unique), "minio_raw_path": f"{MINIO_RAW_BUCKET}/{raw_key}"},
         )
 
-        # 10. Record chunk count in KeyDB job
         await keydb.hset(f"job:{job_id}", mapping={"status": "done", "chunk_count": len(unique)})
     except Exception as e:
         if doc_id:
             await update_document_status(doc_id, "failed")
         await keydb.hset(f"job:{job_id}", mapping={"status": "failed", "error": str(e)[:500]})
 
-    # Set job TTL to 24 hours
     await keydb.expire(f"job:{job_id}", 86400)
 
 
+# ─── Fire-and-Forget Task Tracking ─────────────────────────────────────────────
+# Prevents tasks from being silently lost during shutdown.
+
+_tracked_tasks: set = set()
+
+
+def _fire_and_forget(coro):
+    """Schedule a coroutine as a background task with done callback for cleanup."""
+    task = asyncio.create_task(coro)
+    _tracked_tasks.add(task)
+    task.add_done_callback(_tracked_tasks.discard)
+
+
+async def drain_tracked_tasks(timeout: float = 5.0):
+    """Wait for all tracked background tasks to complete. Called on shutdown."""
+    if not _tracked_tasks:
+        return
+    await asyncio.wait(_tracked_tasks, timeout=timeout)
+
+
 # ─── Entity Extraction (LazyGraphRAG) ───────────────────────────────────────
-# Lightweight entity extraction for cross-document relationship queries.
-# Uses Groq 8b (~$0.0001 per document) + PostgreSQL — no new infrastructure.
-# Fire-and-forget via asyncio.create_task() — never blocks ingestion.
 
 async def _extract_and_store_entities(text: str, tenant_id: str, doc_id: str):
     """Extract named entities from text and upsert to entities table.
-
-    Uses Groq 8b for fast entity extraction (~100ms). Results are stored
-    in the PostgreSQL entities table for the 'graph' query type in the
-    cognitive engine.
-
-    This is the LazyGraphRAG pattern: instead of building a full knowledge
-    graph with a dedicated graph database, we use SQL aggregation over
-    entity-document relationships stored in existing PostgreSQL.
-
-    Cost: +1 Groq 8b call per document (~$0.0001). Zero query latency change.
+    Uses Groq 8b for fast extraction (~100ms). Fire-and-forget — never blocks ingestion.
     """
     import json
-
     try:
         from src.core.generation import fast_complete
 
@@ -616,16 +434,13 @@ Text: {text[:3000]}"""
         if not entities:
             return
 
-        # Upsert entities to PostgreSQL
-        pool = await _get_pg()
+        pool = await get_pool()
         async with pool.acquire() as conn:
-            for entity in entities[:20]:  # Cap at 20 entities per document
+            for entity in entities[:20]:
                 name = entity.get("name", "").strip()
                 etype = entity.get("type", "topic").strip()
                 if not name:
                     continue
-
-                # Upsert: increment mention_count and append doc_id to document_ids
                 await conn.execute("""
                     INSERT INTO entities (tenant_id, entity_name, entity_type, document_ids, mention_count)
                     VALUES ($1, $2, $3, ARRAY[$4::uuid], 1)
@@ -640,6 +455,4 @@ Text: {text[:3000]}"""
                 """, tenant_id, name, etype, doc_id)
 
     except Exception as e:
-        _get_sanitize_logger().warning(
-            f"[non-critical] Entity extraction failed for doc={doc_id}: {type(e).__name__}: {e}"
-        )
+        logger.warning(f"[non-critical] Entity extraction failed for doc={doc_id}: {type(e).__name__}: {e}")

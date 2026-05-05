@@ -1,27 +1,26 @@
 """Langfuse trace middleware — attaches trace to every /v1/ request.
 Compatible with Langfuse v4+ (no decorators module, uses start_observation).
 """
-import os
 from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
 from langfuse import Langfuse
 
+from src.core.config import LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, LANGFUSE_HOST
+
 langfuse = Langfuse(
-    public_key=os.environ.get("LANGFUSE_PUBLIC_KEY", ""),
-    secret_key=os.environ.get("LANGFUSE_SECRET_KEY", ""),
-    host=os.environ.get("LANGFUSE_HOST", "http://langfuse:3100"),
+    public_key=LANGFUSE_PUBLIC_KEY,
+    secret_key=LANGFUSE_SECRET_KEY,
+    host=LANGFUSE_HOST,
 )
 
 
 class LangfuseMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        # Only trace API requests, not health/docs
         if not request.url.path.startswith("/v1/"):
             return await call_next(request)
 
         tenant = getattr(request.state, "tenant_id", "unknown")
 
-        # Langfuse v4: use start_observation for tracing
         trace_id = langfuse.create_trace_id()
         observation = langfuse.start_observation(
             name=request.url.path,
@@ -29,7 +28,6 @@ class LangfuseMiddleware(BaseHTTPMiddleware):
             metadata={"tenant": tenant, "method": request.method},
         )
 
-        # Store trace_id on request state for downstream use
         request.state.langfuse_trace_id = trace_id
 
         try:

@@ -6,55 +6,37 @@ import asyncio
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from io import BytesIO
 
 import boto3
 import dspy
 from ragas import evaluate
-# ragas v0.4+ — use class-based metrics (old function imports are deprecated)
 from ragas.metrics._faithfulness import Faithfulness
 from ragas.metrics._answer_relevance import AnswerRelevancy
 from ragas.metrics._context_precision import ContextPrecision
+from datasets import Dataset
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+from src.core.config import MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY
+from src.core.clients import get_minio
+from src.core.db import get_pool
+
+logger = logging.getLogger(__name__)
 
 faithfulness = Faithfulness()
 answer_relevancy = AnswerRelevancy()
 context_precision = ContextPrecision()
-from datasets import Dataset
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-
-logger = logging.getLogger(__name__)
-
-minio = boto3.client(
-    "s3",
-    endpoint_url=f"http://{os.environ.get('MINIO_ENDPOINT', 'minio:9000')}",
-    aws_access_key_id=os.environ.get("MINIO_ACCESS_KEY"),
-    aws_secret_access_key=os.environ.get("MINIO_SECRET_KEY"),
-)
-
-# Ensure MinIO bucket exists
-try:
-    minio.head_bucket(Bucket="synapseos")
-except Exception as e:
-    logger.warning(f"[non-critical] MinIO head_bucket failed: {type(e).__name__}: {e}")
-    try:
-        minio.create_bucket(Bucket="synapseos")
-    except Exception as e:
-        logger.warning(f"[non-critical] MinIO bucket creation failed: {type(e).__name__}: {e}")
 
 
 async def score_unscored_logs():
     """Run RAGAS evaluation on unscored interaction logs."""
-    import asyncpg
-
-    db_url = os.environ.get("DATABASE_URL", "").replace("+asyncpg", "")
-    conn = await asyncpg.connect(db_url)
-    try:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT id, query, answer, contexts
             FROM interaction_logs
-            WHERE ragas_combined IS NULL
-              AND answer != ''
+            WHERE ragas_combined IS NULL AND answer != ''
             LIMIT 50
         """)
 
@@ -96,20 +78,15 @@ async def score_unscored_logs():
                 logger.warning(f"RAGAS scoring failed for log {row['id']}: {type(e).__name__}: {e}")
 
         return rows
-    finally:
-        await conn.close()
 
 
 async def export_datasets(version: str = None):
     """Export SFT + DPO datasets to MinIO in ChatML format."""
-    import asyncpg
-
     if not version:
-        version = f"v{datetime.utcnow().strftime('%Y%m%d')}"
+        version = f"v{datetime.now(timezone.utc).strftime('%Y%m%d')}"
 
-    db_url = os.environ.get("DATABASE_URL", "").replace("+asyncpg", "")
-    conn = await asyncpg.connect(db_url)
-    try:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
         # SFT: combined >= 0.7, all dimensions >= 0.6
         sft_rows = await conn.fetch("""
             SELECT query, answer FROM interaction_logs
@@ -120,7 +97,6 @@ async def export_datasets(version: str = None):
         """)
 
         # DPO: pair best vs worst answer for same query
-        # Use a subquery because HAVING is invalid with DISTINCT ON in PostgreSQL.
         dpo_rows = await conn.fetch("""
             SELECT sub.query, sub.chosen, sub.rejected
             FROM (
@@ -144,33 +120,33 @@ async def export_datasets(version: str = None):
             WHERE ragas_combined >= 0.7 AND dataset_exported = FALSE
         """)
 
-    finally:
-        await conn.close()
-
-    # SFT — ChatML format (Qwen3 / Unsloth compatible)
-    sft_lines = []
-    for row in sft_rows:
-        sft_lines.append(json.dumps({
+    # SFT — ChatML format
+    sft_lines = [
+        json.dumps({
             "messages": [
                 {"role": "system", "content": "You are a precise knowledge assistant."},
                 {"role": "user", "content": row["query"]},
                 {"role": "assistant", "content": row["answer"]},
             ]
-        }))
+        })
+        for row in sft_rows
+    ]
 
     # DPO — ChatML format
-    dpo_lines = []
-    for row in dpo_rows:
-        dpo_lines.append(json.dumps({
+    dpo_lines = [
+        json.dumps({
             "prompt": [
                 {"role": "system", "content": "You are a precise knowledge assistant."},
                 {"role": "user", "content": row["query"]},
             ],
             "chosen": [{"role": "assistant", "content": row["chosen"]}],
             "rejected": [{"role": "assistant", "content": row["rejected"]}],
-        }))
+        })
+        for row in dpo_rows
+    ]
 
     # Upload to MinIO
+    minio = get_minio()
     for key, lines in [
         (f"datasets/{version}/sft_train.jsonl", sft_lines),
         (f"datasets/{version}/dpo_train.jsonl", dpo_lines),
@@ -186,21 +162,14 @@ async def export_datasets(version: str = None):
 
 
 async def run_dspy_optimization():
-    """DSPy MIPROv2 nightly prompt optimization.
-    Only runs if there are enough high-quality examples (>= 10).
-    """
-    import asyncpg
-
-    db_url = os.environ.get("DATABASE_URL", "").replace("+asyncpg", "")
-    conn = await asyncpg.connect(db_url)
-    try:
+    """DSPy MIPROv2 nightly prompt optimization. Requires >= 10 gold examples."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
         gold_logs = await conn.fetch("""
             SELECT query, answer, contexts FROM interaction_logs
             WHERE ragas_combined >= 0.85
             ORDER BY created_at DESC LIMIT 100
         """)
-    finally:
-        await conn.close()
 
     if len(gold_logs) < 10:
         logger.info("Insufficient gold examples for DSPy optimization — skipping")
@@ -238,14 +207,14 @@ async def run_dspy_optimization():
 
 async def score_and_export():
     """Nightly job: RAGAS score → JSONL export → DSPy optimization."""
-    logger.info(f"[{datetime.utcnow()}] Nightly optimization starting...")
+    logger.info(f"[{datetime.now(timezone.utc)}] Nightly optimization starting...")
     try:
         await score_unscored_logs()
         await export_datasets()
         await run_dspy_optimization()
     except Exception as e:
         logger.error(f"Nightly optimization error: {type(e).__name__}: {e}")
-    logger.info(f"[{datetime.utcnow()}] Nightly optimization complete")
+    logger.info(f"[{datetime.now(timezone.utc)}] Nightly optimization complete")
 
 
 def start_scheduler():
