@@ -254,6 +254,39 @@ async def _create_collection_if_missing(name: str):
     )
 
 
+async def _create_collection_if_missing(name: str):
+    """Create a Qdrant collection with ARM-optimized settings if it doesn't exist.
+    Shared logic for both synapse_knowledge and synapse_memory collections.
+    """
+    if await qdrant.collection_exists(name):
+        return
+
+    await qdrant.create_collection(
+        collection_name=name,
+        vectors_config={
+            "dense": models.VectorParams(
+                size=768,
+                distance=models.Distance.COSINE,
+                on_disk=True,  # ARM mmap — critical
+            )
+        },
+        sparse_vectors_config={
+            "sparse": models.SparseVectorParams(
+                modifier=models.Modifier.IDF
+            )
+        },
+        shard_number=1,
+        optimizers_config=models.OptimizersConfigDiff(
+            memmap_threshold_kb=50_000,
+            indexing_threshold_kb=100_000,
+            max_segment_size_kb=65_536,
+        ),
+    )
+    await qdrant.create_payload_index(
+        name, "tenant_id", models.PayloadSchemaType.KEYWORD
+    )
+
+
 async def ensure_collection():
     """Create Qdrant collections with ARM-optimized settings if they don't exist.
     Creates BOTH synapse_knowledge (RAG) and synapse_memory (mem0) collections.

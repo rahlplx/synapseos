@@ -44,6 +44,7 @@ async def get_collections(request: Request):
             }
 
     return result
+ 58efb67 (fix: resolve all 8 critical weaknesses + 6 architectural security improvements)
 
 
 @router.get("/analytics")

@@ -42,4 +42,5 @@ pydantic>=2.9.0
 semchunk>=1.0.0
 tiktoken>=0.8.0              # Token counting for semantic chunking
 datasets>=3.0.0
+ 58efb67 (fix: resolve all 8 critical weaknesses + 6 architectural security improvements)
 psutil>=5.9.0

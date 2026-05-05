@@ -252,3 +252,4 @@ Quick start: `./scripts/setup-local.sh` (automates steps 1-6)
   - BaseHTTPMiddleware + HTTPException: raises instead of returning 401 in newer Starlette
 - Status: ✅ 27 integration tests passing, local-first strategy validated
 - Next: Add real GROQ_API_KEY → run with real LLM → deploy to Oracle ARM
+ 58efb67 (fix: resolve all 8 critical weaknesses + 6 architectural security improvements)
